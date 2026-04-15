@@ -22,10 +22,8 @@ export type Impound = {
 export type DocumentUploads = {
   /** Government-issued photo ID (front). Data URL. */
   photoId: string;
-  /** Proof of ownership: title or registration. Data URL. */
+  /** Proof of ownership: title, registration, or current insurance card. Data URL. */
   ownership: string;
-  /** Proof of insurance card / declarations page. Data URL. */
-  insurance: string;
 };
 
 export type PendingPickup = {
