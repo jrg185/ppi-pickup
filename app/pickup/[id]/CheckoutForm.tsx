@@ -156,7 +156,6 @@ export default function CheckoutForm({ impoundId, total }: Props) {
               id={`doc-${key}`}
               type="file"
               accept="image/*"
-              capture="environment"
               onChange={(e) => onPick(key, e.target.files?.[0] ?? null)}
               className="mt-2 block w-full text-sm"
               required
