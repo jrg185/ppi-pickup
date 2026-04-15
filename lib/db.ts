@@ -9,8 +9,8 @@
  * The KV backend self-seeds from data/impounds.json on first access, so a
  * fresh deploy has the three demo vehicles available without any extra step.
  *
- * Release documents (photo ID, ownership, insurance) are stored in a second
- * KV key per release to keep any single value under the 1 MB Upstash cap.
+ * Release documents (photo ID and ownership) are stored in a second KV key
+ * per release to keep any single value under the 1 MB Upstash cap.
  */
 
 import fs from "node:fs";
@@ -108,7 +108,7 @@ async function kvLoadRelease(code: string): Promise<Release | null> {
   if (!meta) return null;
   const docs =
     (await kv.get<DocumentUploads>(K.releaseDocs(code))) ??
-    ({ photoId: "", ownership: "", insurance: "" } satisfies DocumentUploads);
+    ({ photoId: "", ownership: "" } satisfies DocumentUploads);
   return { ...meta, docs };
 }
 
