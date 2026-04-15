@@ -12,15 +12,13 @@ export default function Home() {
         </p>
         <ol className="mt-4 space-y-2 text-sm text-valor-navy">
           <li>1. Look up your vehicle by license plate or impound number.</li>
-          <li>
-            2. Upload your photo ID, proof of ownership, and proof of insurance.
-          </li>
+          <li>2. Upload your photo ID and proof of ownership.</li>
           <li>3. Pay the fees securely.</li>
           <li>4. Show the QR code at the lot &mdash; the attendant releases your vehicle.</li>
         </ol>
         <p className="mt-4 rounded-md bg-valor-navy/5 p-3 text-xs text-valor-steel">
-          Have ready before you begin: government-issued photo ID, vehicle title or
-          registration, current insurance card.
+          Have ready before you begin: a government-issued photo ID and a document showing
+          you own the vehicle &mdash; title, current registration, or insurance card.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <Link href="/pickup" className="btn-primary">
