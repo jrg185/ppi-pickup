@@ -18,7 +18,7 @@ type Body = {
 
 function validDocs(docs: Body["docs"]): docs is DocumentUploads {
   if (!docs) return false;
-  const keys: Array<keyof DocumentUploads> = ["photoId", "ownership", "insurance"];
+  const keys: Array<keyof DocumentUploads> = ["photoId", "ownership"];
   return keys.every(
     (k) => typeof docs[k] === "string" && (docs[k] as string).startsWith("data:image/"),
   );
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
   }
   if (!validDocs(docs)) {
     return NextResponse.json(
-      { error: "All three required document images must be uploaded." },
+      { error: "Both required document images must be uploaded." },
       { status: 400 },
     );
   }
