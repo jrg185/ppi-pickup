@@ -1,0 +1,64 @@
+{
+  "impounds": [
+    {
+      "id": "IMP-24081",
+      "plate": "7KLM342",
+      "state": "VA",
+      "vin": "1HGCM82633A123456",
+      "year": 2019,
+      "make": "Honda",
+      "model": "Civic",
+      "color": "Silver",
+      "lotName": "Valor Lot 2 - Alexandria",
+      "lotAddress": "4401 Eisenhower Ave, Alexandria, VA",
+      "towedFrom": "1200 S Hayes St (private property - no permit)",
+      "towedAt": "2026-04-14T02:17:00Z",
+      "fees": {
+        "towing": 19500,
+        "storageDaily": 6500,
+        "admin": 2500
+      },
+      "status": "awaiting"
+    },
+    {
+      "id": "IMP-24082",
+      "plate": "XTR-889",
+      "state": "DC",
+      "vin": "5YJ3E1EA6JF000337",
+      "year": 2021,
+      "make": "Tesla",
+      "model": "Model 3",
+      "color": "White",
+      "lotName": "Valor Lot 1 - Arlington",
+      "lotAddress": "2700 S Quincy St, Arlington, VA",
+      "towedFrom": "Pentagon City Apartments - unauthorized spot",
+      "towedAt": "2026-04-13T21:43:00Z",
+      "fees": {
+        "towing": 21000,
+        "storageDaily": 7500,
+        "admin": 2500
+      },
+      "status": "awaiting"
+    },
+    {
+      "id": "IMP-24083",
+      "plate": "GOVOL1",
+      "state": "TN",
+      "vin": "1FTFW1ET5DFC12345",
+      "year": 2017,
+      "make": "Ford",
+      "model": "F-150",
+      "color": "Black",
+      "lotName": "Valor Lot 3 - Springfield",
+      "lotAddress": "6600 Backlick Rd, Springfield, VA",
+      "towedFrom": "Kings Park Shopping Center - fire lane",
+      "towedAt": "2026-04-12T11:02:00Z",
+      "fees": {
+        "towing": 19500,
+        "storageDaily": 6500,
+        "admin": 2500
+      },
+      "status": "awaiting"
+    }
+  ]
+}
