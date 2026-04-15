@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { compressImageToDataUrl } from "@/lib/image";
 
 type Props = { impoundId: string; total: number };
-type DocKey = "photoId" | "ownership" | "insurance";
+type DocKey = "photoId" | "ownership";
 
 const DOC_META: Record<DocKey, { label: string; help: string }> = {
   photoId: {
@@ -14,11 +14,7 @@ const DOC_META: Record<DocKey, { label: string; help: string }> = {
   },
   ownership: {
     label: "Proof of ownership",
-    help: "Vehicle title or current registration. Make sure the VIN is legible.",
-  },
-  insurance: {
-    label: "Proof of insurance",
-    help: "Insurance card or declarations page showing an active policy.",
+    help: "Vehicle title, current registration, or insurance card. Make sure the VIN is legible.",
   },
 };
 
@@ -32,12 +28,10 @@ export default function CheckoutForm({ impoundId, total }: Props) {
   const [docs, setDocs] = useState<Record<DocKey, string>>({
     photoId: "",
     ownership: "",
-    insurance: "",
   });
   const [docProgress, setDocProgress] = useState<Record<DocKey, string>>({
     photoId: "",
     ownership: "",
-    insurance: "",
   });
 
   async function onPick(key: DocKey, file: File | null) {
@@ -55,13 +49,13 @@ export default function CheckoutForm({ impoundId, total }: Props) {
     }
   }
 
-  const allDocsUploaded = docs.photoId && docs.ownership && docs.insurance;
+  const allDocsUploaded = docs.photoId && docs.ownership;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     if (!allDocsUploaded) {
-      setError("Please upload all three required documents.");
+      setError("Please upload both required documents.");
       return;
     }
     setLoading(true);
