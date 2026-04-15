@@ -1,6 +1,7 @@
 import Link from "next/link";
 import QRCode from "qrcode";
 import {
+  consumePendingPickup,
   createRelease,
   getImpound,
   getRelease,
@@ -27,19 +28,19 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   const session = await stripe.checkout.sessions.retrieve(sp.session_id);
   if (session.payment_status !== "paid") return null;
 
+  const pickupId = session.metadata?.pickupId;
   const impoundId = session.metadata?.impoundId;
-  const customerName = session.metadata?.customerName ?? "Unknown";
-  const customerPhone = session.metadata?.customerPhone ?? "";
-  if (!impoundId) return null;
-  const impound = getImpound(impoundId);
-  if (!impound) return null;
+  if (!pickupId || !impoundId) return null;
+  const pending = consumePendingPickup(pickupId);
+  if (!pending) return null;
 
   const code = generateReleaseCode();
   createRelease({
     code,
     impoundId,
-    customerName,
-    customerPhone,
+    customerName: pending.customerName,
+    customerPhone: pending.customerPhone,
+    docs: pending.docs,
     amountPaidCents: session.amount_total ?? 0,
     paidAt: new Date().toISOString(),
     issuedAt: new Date().toISOString(),

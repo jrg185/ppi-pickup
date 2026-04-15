@@ -19,11 +19,30 @@ export type Impound = {
   status: "awaiting" | "released";
 };
 
+export type DocumentUploads = {
+  /** Government-issued photo ID (front). Data URL. */
+  photoId: string;
+  /** Proof of ownership: title or registration. Data URL. */
+  ownership: string;
+  /** Proof of insurance card / declarations page. Data URL. */
+  insurance: string;
+};
+
+export type PendingPickup = {
+  id: string;
+  impoundId: string;
+  customerName: string;
+  customerPhone: string;
+  docs: DocumentUploads;
+  createdAt: string;
+};
+
 export type Release = {
   code: string;
   impoundId: string;
   customerName: string;
   customerPhone: string;
+  docs: DocumentUploads;
   amountPaidCents: number;
   paidAt: string;
   issuedAt: string;

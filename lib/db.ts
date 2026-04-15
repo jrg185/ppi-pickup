@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Impound, Release } from "./types";
+import type { Impound, PendingPickup, Release } from "./types";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
@@ -9,12 +9,13 @@ const SEED_PATH = path.join(DATA_DIR, "impounds.json");
 type Store = {
   impounds: Impound[];
   releases: Release[];
+  pending: PendingPickup[];
 };
 
 function loadSeed(): Store {
   const raw = fs.readFileSync(SEED_PATH, "utf8");
   const parsed = JSON.parse(raw) as { impounds: Impound[] };
-  return { impounds: parsed.impounds, releases: [] };
+  return { impounds: parsed.impounds, releases: [], pending: [] };
 }
 
 function readStore(): Store {
@@ -24,7 +25,13 @@ function readStore(): Store {
     return seed;
   }
   const raw = fs.readFileSync(STORE_PATH, "utf8");
-  return JSON.parse(raw) as Store;
+  const parsed = JSON.parse(raw) as Partial<Store>;
+  // Backfill for stores created before the pending-pickup schema existed.
+  return {
+    impounds: parsed.impounds ?? [],
+    releases: parsed.releases ?? [],
+    pending: parsed.pending ?? [],
+  };
 }
 
 function writeStore(store: Store): void {
@@ -77,6 +84,22 @@ export function redeemRelease(code: string, attendant: string): Release | null {
   if (impound) impound.status = "released";
   writeStore(store);
   return release;
+}
+
+export function createPendingPickup(p: PendingPickup): void {
+  const store = readStore();
+  // Cap the pending list to keep the JSON store manageable between resets.
+  store.pending = [...store.pending.slice(-20), p];
+  writeStore(store);
+}
+
+export function consumePendingPickup(id: string): PendingPickup | null {
+  const store = readStore();
+  const idx = store.pending.findIndex((p) => p.id === id);
+  if (idx < 0) return null;
+  const [picked] = store.pending.splice(idx, 1);
+  writeStore(store);
+  return picked;
 }
 
 /** Reset the prototype store back to seed data. Useful between demos. */

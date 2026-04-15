@@ -1,17 +1,39 @@
 import { NextResponse } from "next/server";
-import { createRelease, getImpound } from "@/lib/db";
+import { createPendingPickup, createRelease, getImpound } from "@/lib/db";
 import { computeFees } from "@/lib/fees";
 import { generateReleaseCode } from "@/lib/codes";
 import { baseUrl, getStripe, isDemoMode } from "@/lib/stripe";
+import type { DocumentUploads } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
+// Base64 docs can push request bodies past default limits; lift it.
+export const maxDuration = 60;
 
-type Body = { impoundId?: string; name?: string; phone?: string };
+type Body = {
+  impoundId?: string;
+  name?: string;
+  phone?: string;
+  docs?: Partial<DocumentUploads>;
+};
+
+function validDocs(docs: Body["docs"]): docs is DocumentUploads {
+  if (!docs) return false;
+  const keys: Array<keyof DocumentUploads> = ["photoId", "ownership", "insurance"];
+  return keys.every(
+    (k) => typeof docs[k] === "string" && (docs[k] as string).startsWith("data:image/"),
+  );
+}
 
 export async function POST(req: Request) {
-  const { impoundId, name, phone } = (await req.json()) as Body;
+  const { impoundId, name, phone, docs } = (await req.json()) as Body;
   if (!impoundId || !name || !phone) {
     return NextResponse.json({ error: "Missing fields." }, { status: 400 });
+  }
+  if (!validDocs(docs)) {
+    return NextResponse.json(
+      { error: "All three required document images must be uploaded." },
+      { status: 400 },
+    );
   }
   const impound = getImpound(impoundId);
   if (!impound) {
@@ -22,7 +44,7 @@ export async function POST(req: Request) {
   }
   const fees = computeFees(impound);
 
-  // Demo mode: skip Stripe, issue the release immediately.
+  // Demo mode: skip Stripe, issue the release immediately (with docs attached).
   if (isDemoMode()) {
     const code = generateReleaseCode();
     createRelease({
@@ -30,6 +52,7 @@ export async function POST(req: Request) {
       impoundId: impound.id,
       customerName: name,
       customerPhone: phone,
+      docs,
       amountPaidCents: fees.total,
       paidAt: new Date().toISOString(),
       issuedAt: new Date().toISOString(),
@@ -45,6 +68,18 @@ export async function POST(req: Request) {
   if (!stripe) {
     return NextResponse.json({ error: "Payment processor misconfigured." }, { status: 500 });
   }
+
+  // Stash docs server-side keyed by a pickupId; attach id to the Stripe session
+  // metadata so the success page can finalize the release.
+  const pickupId = `pickup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  createPendingPickup({
+    id: pickupId,
+    impoundId: impound.id,
+    customerName: name,
+    customerPhone: phone,
+    docs,
+    createdAt: new Date().toISOString(),
+  });
 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
@@ -62,12 +97,7 @@ export async function POST(req: Request) {
         },
       },
     ],
-    customer_email: undefined,
-    metadata: {
-      impoundId: impound.id,
-      customerName: name,
-      customerPhone: phone,
-    },
+    metadata: { pickupId, impoundId: impound.id },
     success_url: `${baseUrl()}/pickup/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl()}/pickup/${impound.id}`,
   });
