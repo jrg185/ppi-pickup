@@ -148,19 +148,18 @@ export default async function AttendantVerify({
           </h2>
           <p className="mt-1 text-xs text-valor-steel">
             Tap any image to view full size. Compare the ID photo to the person at the
-            window and confirm the name matches the title/registration.
+            window and confirm the name matches the ownership document.
           </p>
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <DocThumb label="Photo ID" src={release.docs.photoId} />
             <DocThumb label="Ownership" src={release.docs.ownership} />
-            <DocThumb label="Insurance" src={release.docs.insurance} />
           </div>
         </div>
 
         <div className="mt-4 rounded-md bg-amber-50 p-3 text-xs text-amber-900">
           <b>Before releasing:</b> confirm (1) the person at the window matches the photo
-          ID, (2) the name on the ID matches the title / registration, (3) the insurance
-          is current, and (4) the vehicle on the lot matches the plate and VIN above.
+          ID, (2) the name on the ID matches the ownership document (title, registration,
+          or insurance), and (3) the vehicle on the lot matches the plate and VIN above.
         </div>
 
         {!alreadyRedeemed && <RedeemButton code={release.code} pin={pin} />}
