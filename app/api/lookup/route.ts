@@ -8,7 +8,7 @@ export async function POST(req: Request) {
   if (!query || typeof query !== "string") {
     return NextResponse.json({ error: "Missing query." }, { status: 400 });
   }
-  const impound = findImpound(query);
+  const impound = await findImpound(query);
   if (!impound) {
     return NextResponse.json(
       {

@@ -35,7 +35,7 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const impound = getImpound(impoundId);
+  const impound = await getImpound(impoundId);
   if (!impound) {
     return NextResponse.json({ error: "Impound not found." }, { status: 404 });
   }
@@ -47,7 +47,7 @@ export async function POST(req: Request) {
   // Demo mode: skip Stripe, issue the release immediately (with docs attached).
   if (isDemoMode()) {
     const code = generateReleaseCode();
-    createRelease({
+    await createRelease({
       code,
       impoundId: impound.id,
       customerName: name,
@@ -72,7 +72,7 @@ export async function POST(req: Request) {
   // Stash docs server-side keyed by a pickupId; attach id to the Stripe session
   // metadata so the success page can finalize the release.
   const pickupId = `pickup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  createPendingPickup({
+  await createPendingPickup({
     id: pickupId,
     impoundId: impound.id,
     customerName: name,

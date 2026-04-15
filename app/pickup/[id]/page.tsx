@@ -6,8 +6,12 @@ import CheckoutForm from "./CheckoutForm";
 
 export const dynamic = "force-dynamic";
 
-export default function PickupDetails({ params }: { params: { id: string } }) {
-  const impound = getImpound(params.id);
+export default async function PickupDetails({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const impound = await getImpound(params.id);
   if (!impound) notFound();
   if (impound.status === "released") {
     return (

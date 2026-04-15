@@ -20,7 +20,7 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   if (!sp.session_id) return null;
 
   // Idempotent: if we've already minted a release for this session, return it.
-  const existing = getReleaseBySession(sp.session_id);
+  const existing = await getReleaseBySession(sp.session_id);
   if (existing) return existing.code;
 
   const stripe = getStripe();
@@ -31,11 +31,11 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   const pickupId = session.metadata?.pickupId;
   const impoundId = session.metadata?.impoundId;
   if (!pickupId || !impoundId) return null;
-  const pending = consumePendingPickup(pickupId);
+  const pending = await consumePendingPickup(pickupId);
   if (!pending) return null;
 
   const code = generateReleaseCode();
-  createRelease({
+  await createRelease({
     code,
     impoundId,
     customerName: pending.customerName,
@@ -72,7 +72,7 @@ export default async function SuccessPage({
     );
   }
 
-  const release = getRelease(code);
+  const release = await getRelease(code);
   if (!release) {
     return (
       <div className="card">
@@ -83,7 +83,7 @@ export default async function SuccessPage({
       </div>
     );
   }
-  const impound = getImpound(release.impoundId);
+  const impound = await getImpound(release.impoundId);
   if (!impound) return null;
 
   const verifyUrl = `${baseUrl()}/attendant/verify?code=${encodeURIComponent(code)}`;

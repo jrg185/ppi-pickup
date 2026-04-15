@@ -14,7 +14,7 @@ export async function POST(req: Request) {
   if (!code || !attendant) {
     return NextResponse.json({ error: "Missing fields." }, { status: 400 });
   }
-  const release = redeemRelease(code, attendant);
+  const release = await redeemRelease(code, attendant);
   if (!release) {
     return NextResponse.json({ error: "Release not found." }, { status: 404 });
   }

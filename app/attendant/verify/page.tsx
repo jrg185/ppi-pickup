@@ -12,7 +12,7 @@ function attendantPin(): string {
   return process.env.ATTENDANT_PIN ?? "8421";
 }
 
-export default function AttendantVerify({
+export default async function AttendantVerify({
   searchParams,
 }: {
   searchParams: SearchParams;
@@ -63,7 +63,7 @@ export default function AttendantVerify({
     );
   }
 
-  const release = getRelease(code);
+  const release = await getRelease(code);
   if (!release) {
     return (
       <div className="card">
@@ -78,7 +78,7 @@ export default function AttendantVerify({
       </div>
     );
   }
-  const impound = getImpound(release.impoundId);
+  const impound = await getImpound(release.impoundId);
   if (!impound) return null;
 
   const alreadyRedeemed = Boolean(release.redeemedAt);

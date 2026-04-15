@@ -35,10 +35,47 @@ from the payment form to the release QR. Best for live walkthroughs.
    ```
 3. Pay with card `4242 4242 4242 4242`, any future expiry, any CVC.
 
-## Running the attendant side from your phone
+## Deploying to Vercel (recommended for cross-device demos)
 
-The default `localhost:3000` only works on the machine running the server, so the QR
-code can't be scanned from a separate phone. Two steps to fix that:
+The prototype uses a JSON file locally but automatically switches to Vercel KV
+when `KV_REST_API_URL` is present, so the same code runs in both places.
+
+### One-time setup
+
+1. Push this branch to GitHub (already done if you&rsquo;re reading this).
+2. Go to <https://vercel.com/new>, click **Import Git Repository**, pick this repo,
+   and on the import screen select the branch `claude/vehicle-pickup-portal-084iJ`.
+   Click **Deploy**.
+3. The first deploy will succeed but the app won&rsquo;t be able to persist anything
+   because KV isn&rsquo;t attached yet. That&rsquo;s expected &mdash; fix it next.
+4. In your new project: **Storage &rarr; Create Database &rarr; KV** (or pick any
+   Redis-compatible option from the marketplace). Connect it to this project.
+   Vercel injects `KV_REST_API_URL` and `KV_REST_API_TOKEN` into the env
+   automatically.
+5. Go to **Settings &rarr; Environment Variables** and add:
+   - `NEXT_PUBLIC_BASE_URL` = your Vercel URL, e.g. `https://valor-pickup.vercel.app`
+   - `ATTENDANT_PIN` = `8421` (or whatever you want to demo with)
+   - `STRIPE_SECRET_KEY` = `sk_test_...` *(optional; omit to keep demo mode)*
+6. Redeploy (**Deployments &rarr; latest &rarr; &hellip; &rarr; Redeploy**).
+7. Hit <https://your-url/api/admin/reset> via curl to ensure the three demo
+   vehicles are seeded (they&rsquo;re also seeded automatically on first lookup):
+   ```bash
+   curl -X POST https://your-url/api/admin/reset
+   ```
+
+You now have a public HTTPS URL. Open it on your laptop to run the customer
+flow and on your phone to scan the QR and run the attendant flow.
+
+### Resetting the hosted demo between runs
+
+```bash
+curl -X POST https://your-url/api/admin/reset
+```
+
+## Running the attendant side from your phone (local-only alternative)
+
+If you&rsquo;d rather stay on your laptop, you can still get phone access on the
+same Wi-Fi without deploying:
 
 ### 1. Find your Mac&rsquo;s LAN IP
 

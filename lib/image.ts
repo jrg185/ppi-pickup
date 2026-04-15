@@ -7,8 +7,10 @@ export async function compressImageToDataUrl(
   file: File,
   opts: { maxDim?: number; quality?: number } = {},
 ): Promise<string> {
-  const maxDim = opts.maxDim ?? 1600;
-  const quality = opts.quality ?? 0.75;
+  // Target ~150-250 KB per document so all three fit comfortably under the
+  // 1 MB per-key KV limit when encoded as base64.
+  const maxDim = opts.maxDim ?? 1200;
+  const quality = opts.quality ?? 0.72;
 
   const bitmap = await createImageBitmap(file);
   const ratio = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
