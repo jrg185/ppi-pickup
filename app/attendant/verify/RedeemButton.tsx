@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-export default function RedeemButton({ code, pin }: { code: string; pin: string }) {
+export default function RedeemButton({ code }: { code: string }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +20,7 @@ export default function RedeemButton({ code, pin }: { code: string; pin: string 
       const res = await fetch("/api/release/redeem", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, pin, attendant }),
+        body: JSON.stringify({ code, attendant }),
       });
       const data = await res.json();
       if (!res.ok) {

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { createPendingPickup, createRelease, getImpound } from "@/lib/db";
+import { createPendingPickup, createRelease, findActiveRelease, getImpound } from "@/lib/db";
 import { computeFees } from "@/lib/fees";
 import { generateReleaseCode } from "@/lib/codes";
-import { baseUrl, getStripe, isDemoMode } from "@/lib/stripe";
+import { baseUrl, getStripe } from "@/lib/stripe";
+import { unpaidDemoReleaseAllowed } from "@/lib/security";
 import type { DocumentUploads } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -42,12 +43,26 @@ export async function POST(req: Request) {
   if (impound.status === "released") {
     return NextResponse.json({ error: "Vehicle already released." }, { status: 409 });
   }
+  const active = await findActiveRelease(impound.id);
+  if (active) {
+    return NextResponse.json(
+      { error: "A release code has already been issued for this vehicle." },
+      { status: 409 },
+    );
+  }
   const fees = computeFees(impound);
 
-  // Demo mode: skip Stripe, issue the release immediately (with docs attached).
-  if (isDemoMode()) {
+  // Unpaid demo codes exist only for loopback development. Public and
+  // production deploys must not mint a release without a verified payment.
+  if (!process.env.STRIPE_SECRET_KEY) {
+    if (!unpaidDemoReleaseAllowed(req)) {
+      return NextResponse.json(
+        { error: "Payment is required before a release code can be issued." },
+        { status: 403 },
+      );
+    }
     const code = generateReleaseCode();
-    await createRelease({
+    const created = await createRelease({
       code,
       impoundId: impound.id,
       customerName: name,
@@ -61,6 +76,15 @@ export async function POST(req: Request) {
       stripeSessionId: null,
       demo: true,
     });
+    if (created === "active_exists") {
+      return NextResponse.json(
+        { error: "A release code has already been issued for this vehicle." },
+        { status: 409 },
+      );
+    }
+    if (created !== "created") {
+      return NextResponse.json({ error: "Vehicle already released." }, { status: 409 });
+    }
     return NextResponse.json({ code });
   }
 

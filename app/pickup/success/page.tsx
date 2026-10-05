@@ -35,7 +35,7 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   if (!pending) return null;
 
   const code = generateReleaseCode();
-  await createRelease({
+  const created = await createRelease({
     code,
     impoundId,
     customerName: pending.customerName,
@@ -49,6 +49,10 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
     stripeSessionId: session.id,
     demo: false,
   });
+  if (created !== "created") {
+    const again = await getReleaseBySession(session.id);
+    return again?.code ?? null;
+  }
   return code;
 }
 
