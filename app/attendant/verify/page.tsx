@@ -1,25 +1,30 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { getImpound, getRelease } from "@/lib/db";
 import { formatUSD } from "@/lib/fees";
+import { ATTENDANT_COOKIE, attendantPin, isValidAttendantSession } from "@/lib/security";
 import DocThumb from "./DocThumb";
+import PinForm from "./PinForm";
 import RedeemButton from "./RedeemButton";
 
 export const dynamic = "force-dynamic";
 
 type SearchParams = { code?: string; pin?: string };
 
-function attendantPin(): string {
-  return process.env.ATTENDANT_PIN ?? "8421";
-}
-
 export default async function AttendantVerify({
   searchParams,
 }: {
   searchParams: SearchParams;
 }) {
+  // Old links put the PIN in the query string. Drop it before rendering so it
+  // is not reflected into the page or the Next.js payload.
+  if (typeof searchParams.pin === "string") {
+    const cleaned = (searchParams.code ?? "").trim().toUpperCase();
+    redirect(cleaned ? `/attendant/verify?code=${encodeURIComponent(cleaned)}` : "/attendant");
+  }
+
   const code = (searchParams.code ?? "").toUpperCase();
-  const pin = searchParams.pin ?? "";
-  const requiredPin = attendantPin();
 
   if (!code) {
     return (
@@ -32,35 +37,23 @@ export default async function AttendantVerify({
     );
   }
 
-  // Gentle PIN gate. If the attendant opened from a QR scan without a PIN,
-  // prompt them here instead of rejecting outright.
-  if (pin !== requiredPin) {
+  if (!attendantPin()) {
     return (
-      <form action="/attendant/verify" className="card space-y-4">
-        <h1 className="text-xl font-bold">Attendant PIN required</h1>
-        <p className="text-sm text-valor-steel">
-          Enter the lot attendant PIN to view release details for <b>{code}</b>.
+      <div className="card">
+        <h1 className="text-xl font-bold">Attendant access is not configured</h1>
+        <p className="mt-2 text-sm text-valor-steel">
+          Set <span className="font-mono">ATTENDANT_PIN</span> before using this page. There is
+          no default PIN.
         </p>
-        <input type="hidden" name="code" value={code} />
-        <div>
-          <label htmlFor="pin" className="label">
-            PIN
-          </label>
-          <input
-            id="pin"
-            name="pin"
-            className="input"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            autoFocus
-            required
-          />
-        </div>
-        <button type="submit" className="btn-primary w-full justify-center">
-          Continue
-        </button>
-      </form>
+      </div>
     );
+  }
+
+  // PIN is posted to /api/attendant/session and kept in an httpOnly cookie.
+  // A PIN in the query string is ignored so it never lives in the URL.
+  const token = cookies().get(ATTENDANT_COOKIE)?.value;
+  if (!isValidAttendantSession(token)) {
+    return <PinForm code={code} />;
   }
 
   const release = await getRelease(code);
@@ -81,7 +74,7 @@ export default async function AttendantVerify({
   const impound = await getImpound(release.impoundId);
   if (!impound) return null;
 
-  const alreadyRedeemed = Boolean(release.redeemedAt);
+  const alreadyRedeemed = Boolean(release.redeemedAt) || impound.status === "released";
 
   return (
     <div className="space-y-6">
@@ -97,7 +90,7 @@ export default async function AttendantVerify({
               : "bg-emerald-50 text-emerald-700"
           }`}
         >
-          {alreadyRedeemed ? "Already redeemed" : "Valid release"}
+          {alreadyRedeemed ? "Already released" : "Valid release"}
         </div>
         <h1 className="mt-3 text-2xl font-bold">
           {impound.year} {impound.make} {impound.model}
@@ -128,17 +121,23 @@ export default async function AttendantVerify({
             <dt>Impound</dt>
             <dd className="font-mono">{impound.id}</dd>
           </div>
-          {alreadyRedeemed && (
+          {release.redeemedAt && (
             <>
               <div className="kvp">
                 <dt>Redeemed at</dt>
-                <dd>{new Date(release.redeemedAt!).toLocaleString()}</dd>
+                <dd>{new Date(release.redeemedAt).toLocaleString()}</dd>
               </div>
               <div className="kvp">
                 <dt>Redeemed by</dt>
                 <dd>{release.redeemedBy}</dd>
               </div>
             </>
+          )}
+          {alreadyRedeemed && !release.redeemedAt && (
+            <div className="kvp">
+              <dt>Status</dt>
+              <dd>Vehicle already released</dd>
+            </div>
           )}
         </dl>
 
@@ -162,7 +161,7 @@ export default async function AttendantVerify({
           or insurance), and (3) the vehicle on the lot matches the plate and VIN above.
         </div>
 
-        {!alreadyRedeemed && <RedeemButton code={release.code} pin={pin} />}
+        {!alreadyRedeemed && <RedeemButton code={release.code} />}
       </div>
 
       <div className="text-center">

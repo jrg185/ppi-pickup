@@ -27,7 +27,7 @@ A self-service web portal for customers retrieving vehicles impounded from priva
      - Proof of ownership (title, current registration, **or** insurance card — insurance qualifies as proof of ownership for PPI)
    - Acknowledgement checkbox
    - Pay button (disabled until both docs uploaded + checkbox checked)
-4. **Payment** — Stripe Checkout (test mode). If no Stripe key is configured, the app runs in "demo mode" and skips straight to the success page (useful for live walkthroughs without Stripe setup).
+4. **Payment** — Stripe Checkout (test mode). A release code is created only after Stripe reports the session as paid. Unpaid demo issuance is refused on production, Vercel, and any non-loopback host. Loopback `next dev` may still issue a demo code when `STRIPE_SECRET_KEY` is unset.
 5. **Success page** — displays:
    - QR code encoding a URL to the attendant verification page
    - Human-readable release code (e.g., `ABCD-1234`) as fallback
@@ -36,18 +36,18 @@ A self-service web portal for customers retrieving vehicles impounded from priva
 ### Attendant Flow
 
 1. **Attendant console** (`/attendant`) — text input for release code + attendant PIN. QR codes issued to customers encode a direct URL to the verify page, so scanning with a phone camera opens it directly.
-2. **PIN gate** — simple shared PIN (configurable via env var, default `8421`). If the attendant scans a QR without a PIN in the URL, the page prompts for it.
+2. **PIN gate** — shared PIN from `ATTENDANT_PIN`. There is no default; if the variable is unset the console stays locked. The PIN is submitted with POST to `/api/attendant/session` and stored in an httpOnly cookie. It is never put in the URL. If a `pin` query parameter is present, middleware redirects to the same page without it. Failed attempts are rate limited.
 3. **Verify page** — shows:
    - Vehicle details (plate, VIN, year/make/model/color)
    - Customer name, phone, payment amount, payment timestamp
    - **Two document thumbnails** (Photo ID + Ownership) — tap to view full size
    - Yellow SOP reminder: "Before releasing: confirm (1) person matches photo ID, (2) name on ID matches ownership document, (3) vehicle on lot matches plate and VIN"
    - Attendant name/badge input + "Release vehicle" button
-4. **Redemption** — single-use. After release, the page shows "Already redeemed" with who released it and when. Re-scanning the QR or re-looking-up the plate shows the vehicle as already released.
+4. **Redemption** — one active (unredeemed) release per impound. A second code is not issued while one is outstanding or after the impound is released. Redeem rejects a code that was already redeemed and rejects any code once the vehicle is released. After release, the page shows "Already released" with who released it and when. Re-scanning the QR or re-looking-up the plate shows the vehicle as already released.
 
 ### Admin
 
-- `POST /api/admin/reset` — clears all releases and pending pickups, resets impound records to `awaiting` status. Used between demo runs.
+- `POST /api/admin/reset` — clears all releases and pending pickups, resets impound records to `awaiting` status. Requires header `X-Admin-Secret` matching `ADMIN_RESET_SECRET` (timing-safe compare). If the secret is unset, every call is rejected and nothing is deleted.
 
 ---
 
@@ -57,7 +57,7 @@ A self-service web portal for customers retrieving vehicles impounded from priva
 |-------|--------|-------|
 | Framework | Next.js 14 (App Router) | TypeScript, React Server Components |
 | Styling | Tailwind CSS | Custom color palette: `valor-navy`, `valor-steel`, `valor-accent`, `valor-bg` |
-| Payments | Stripe Checkout | Test mode; demo-mode fallback when `STRIPE_SECRET_KEY` is unset |
+| Payments | Stripe Checkout | Test mode. Unpaid demo codes only on loopback dev; public deploys fail closed |
 | QR codes | `qrcode` npm package | Server-side generation as data URL |
 | Storage (local) | JSON file (`data/store.json`) | Auto-seeded from `data/impounds.json` |
 | Storage (Vercel) | Vercel KV (Upstash Redis) | Activated when `KV_REST_API_URL` env var is present |
@@ -161,6 +161,7 @@ The data layer (`lib/db.ts`) must support two backends behind the same async int
    - `valor:release_docs:<CODE>` — document uploads (split from release to stay under 1 MB per-key Upstash limit)
    - `valor:release_by_session:<SESSION_ID>` — maps Stripe session to release code
    - `valor:release_codes` — set of all release codes (for reset cleanup)
+   - `valor:active_release:<IMPOUND_ID>` — code of the single unredeemed release for that impound
    - `valor:pending:<ID>` — pending pickup (1-hour TTL)
    - `valor:pending_ids` — set of pending IDs
    - `valor:seeded` — boolean flag for auto-seeding
@@ -176,8 +177,8 @@ All public db functions are async. The backend is chosen at call time via `Boole
 - Metadata carries `pickupId` and `impoundId`.
 - Success URL: `/pickup/success?session_id={CHECKOUT_SESSION_ID}`
 - Cancel URL: `/pickup/{impoundId}` (back to the review page)
-- On the success page, the app retrieves the Stripe session, confirms `payment_status === "paid"`, consumes the pending pickup, and creates the release.
-- **Demo mode**: when `STRIPE_SECRET_KEY` is unset, the checkout API skips Stripe entirely, creates the release immediately, and returns `{ code }` instead of `{ url }`.
+- On the success page, the app retrieves the Stripe session, confirms `payment_status === "paid"`, consumes the pending pickup, and creates the release. Creation is refused when that impound already has an active release or is already released.
+- **Local demo**: when `STRIPE_SECRET_KEY` is unset, checkout may create a release immediately only if the process is not production, not Vercel, and the request host is loopback. Otherwise checkout returns an error and does not issue a code.
 
 ---
 
@@ -209,10 +210,11 @@ Fee structure per vehicle: towing ($195-210), storage ($65-75/day), admin ($25).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `STRIPE_SECRET_KEY` | No | (unset = demo mode) | Stripe test secret key |
+| `STRIPE_SECRET_KEY` | Yes on public deploys | unset allows unpaid codes on loopback dev only | Stripe test secret key |
 | `STRIPE_PUBLISHABLE_KEY` | No | — | Not currently used (Checkout is server-side redirect) |
-| `NEXT_PUBLIC_BASE_URL` | Yes (Vercel) | `http://localhost:3000` | Used for QR code URLs and Stripe redirects |
-| `ATTENDANT_PIN` | No | `8421` | PIN for the attendant verify page |
+| `NEXT_PUBLIC_BASE_URL` | Yes (Vercel) | `http://localhost:3000` | Used for QR code URLs and Stripe redirects. A non-local value disables unpaid demo codes |
+| `ATTENDANT_PIN` | Yes | (none) | Attendant PIN. No default. Submitted via POST, never in the URL |
+| `ADMIN_RESET_SECRET` | Yes to reset | (unset disables reset) | Compared timing-safely to the `X-Admin-Secret` header |
 | `KV_REST_API_URL` | Auto (Vercel) | — | Injected by Vercel when KV is attached |
 | `KV_REST_API_TOKEN` | Auto (Vercel) | — | Injected by Vercel when KV is attached |
 
@@ -233,15 +235,18 @@ app/
   attendant/verify/RedeemButton.tsx   Release button (client component)
   api/
     lookup/route.ts                   POST: find impound by plate/VIN/ID
-    checkout/route.ts                 POST: create Stripe session or demo release
-    release/redeem/route.ts           POST: mark release as redeemed
-    admin/reset/route.ts              POST: reset all data to seed state
+    checkout/route.ts                 POST: create Stripe session; unpaid demo only on loopback dev
+    release/redeem/route.ts           POST: mark release as redeemed (rejects already released)
+    attendant/session/route.ts        POST: check attendant PIN, set httpOnly cookie
+    admin/reset/route.ts              POST: reset all data; requires X-Admin-Secret
 lib/
   db.ts        Dual-backend storage (file + Vercel KV)
   fees.ts      Fee calculation + USD formatting
   codes.ts     Release code generator
   stripe.ts    Stripe client + demo-mode detection
+  security.ts  timing-safe secret compare, public demo gate, PIN session + rate limit
   image.ts     Client-side image compression utility
+middleware.ts  Redirects /attendant/verify?pin=... to the same path without pin
   types.ts     TypeScript types
 data/
   impounds.json   Seed records (3 demo vehicles)
@@ -267,7 +272,7 @@ data/
 3. In Vercel project: Storage → Create Database → KV. Connect to project.
 4. Settings → Environment Variables: set `NEXT_PUBLIC_BASE_URL` to the Vercel URL.
 5. Redeploy.
-6. Hit `POST /api/admin/reset` to seed the demo vehicles.
+6. Impounds seed on first lookup. `POST /api/admin/reset` with header `X-Admin-Secret` only works when `ADMIN_RESET_SECRET` is set; unauthenticated calls are rejected.
 
 ---
 

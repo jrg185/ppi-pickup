@@ -20,10 +20,14 @@ npm run dev
 
 Open <http://localhost:3000>.
 
-### Demo mode (no Stripe keys)
+### Local development without Stripe
 
-If `STRIPE_SECRET_KEY` is unset, the portal skips Stripe Checkout and jumps straight
-from the payment form to the release QR. Best for live walkthroughs.
+Release codes are issued only after Stripe confirms payment. The one exception is
+loopback `next dev` on `localhost` when `STRIPE_SECRET_KEY` is unset. Production,
+Vercel, and any non-local host refuse to mint a code without a verified payment.
+
+Set `ATTENDANT_PIN` in `.env.local` before using the attendant console. There is
+no default PIN.
 
 ### With real Stripe test mode
 
@@ -54,13 +58,16 @@ when `KV_REST_API_URL` is present, so the same code runs in both places.
    automatically.
 5. Go to **Settings &rarr; Environment Variables** and add:
    - `NEXT_PUBLIC_BASE_URL` = your Vercel URL, e.g. `https://valor-pickup.vercel.app`
-   - `ATTENDANT_PIN` = `8421` (or whatever you want to demo with)
-   - `STRIPE_SECRET_KEY` = `sk_test_...` *(optional; omit to keep demo mode)*
+   - `ATTENDANT_PIN` = a PIN you choose (required; there is no default)
+   - `STRIPE_SECRET_KEY` = `sk_test_...` (required on a public deploy)
+   - `ADMIN_RESET_SECRET` = a long random secret if you need to reset demo data
 6. Redeploy (**Deployments &rarr; latest &rarr; &hellip; &rarr; Redeploy**).
-7. Hit <https://your-url/api/admin/reset> via curl to ensure the three demo
-   vehicles are seeded (they&rsquo;re also seeded automatically on first lookup):
+7. Impound records seed themselves on first lookup. To wipe releases and pending
+   pickups between demos, call reset with the secret header (the route rejects
+   unauthenticated calls, and does nothing useful if the secret is unset):
    ```bash
-   curl -X POST https://your-url/api/admin/reset
+   curl -X POST https://your-url/api/admin/reset \
+     -H "X-Admin-Secret: $ADMIN_RESET_SECRET"
    ```
 
 You now have a public HTTPS URL. Open it on your laptop to run the customer
@@ -69,8 +76,12 @@ flow and on your phone to scan the QR and run the attendant flow.
 ### Resetting the hosted demo between runs
 
 ```bash
-curl -X POST https://your-url/api/admin/reset
+curl -X POST https://your-url/api/admin/reset \
+  -H "X-Admin-Secret: $ADMIN_RESET_SECRET"
 ```
+
+Without `ADMIN_RESET_SECRET`, or without that header, the endpoint returns 401 and
+does not delete anything.
 
 ## Running the attendant side from your phone (local-only alternative)
 
@@ -103,8 +114,10 @@ Now make sure your phone is on the same Wi-Fi. On your phone, visit
 `http://192.168.1.47:3000` &mdash; you should see the portal. Then scanning the QR code
 from your laptop screen will open the attendant verify page on your phone.
 
-> Using Stripe test mode? Stripe will redirect back to `NEXT_PUBLIC_BASE_URL`, so
-> change that too when switching between localhost and LAN IP.
+> Stripe is required once the site is opened from another device. A LAN host is not
+> loopback, so checkout will not issue a release code until `STRIPE_SECRET_KEY` is set
+> and the payment is verified. Stripe redirects back to `NEXT_PUBLIC_BASE_URL`, so
+> change that when switching between localhost and a LAN IP.
 
 ## Demo script (3 minutes)
 
@@ -120,8 +133,9 @@ from your laptop screen will open the attendant verify page on your phone.
 7. Success page shows the QR + release code like `ABCD-1234`.
 8. On your phone, point the camera at the QR. Tap the notification &mdash; your phone
    opens the attendant verify page.
-9. Enter PIN `8421`. The page shows the vehicle, who paid, payment timestamp, and
+9. Enter the PIN from `ATTENDANT_PIN`. The page shows the vehicle, who paid, payment timestamp, and
    thumbnails of all three uploaded documents. Tap any document to view full size.
+   The PIN is posted to the server and is not placed in the URL.
 10. Type a badge number in the "Your name or badge" field and tap **Release vehicle**.
 11. The page flips to "Already redeemed". Trying to re-scan the QR shows the same.
     Going back to `/pickup` and re-looking-up the plate now rejects the vehicle as
@@ -135,17 +149,19 @@ from your laptop screen will open the attendant verify page on your phone.
 | `XTR-889` | `IMP-24082` | 2021 Tesla Model 3, White | Arlington |
 | `GOVOL1` | `IMP-24083` | 2017 Ford F-150, Black  | Springfield |
 
-Attendant PIN: `8421` (override with `ATTENDANT_PIN` in `.env.local`).
+Set `ATTENDANT_PIN` in `.env.local`. There is no built-in PIN.
 
 ## Resetting the demo
 
-In a second terminal:
+In a second terminal, with `ADMIN_RESET_SECRET` set in the server environment:
 
 ```bash
-curl -X POST http://localhost:3000/api/admin/reset
+curl -X POST http://localhost:3000/api/admin/reset \
+  -H "X-Admin-Secret: $ADMIN_RESET_SECRET"
 ```
 
-Clears all pending pickups and releases; impounds return to `awaiting`.
+Clears all pending pickups and releases; impounds return to `awaiting`. The call
+is rejected when the secret is missing or wrong.
 
 ## What would still need to happen for production
 
@@ -172,19 +188,23 @@ app/
   pickup/success/page.tsx             step 3: QR + receipt
   attendant/page.tsx                  attendant console
   attendant/verify/page.tsx           release verify + redeem
+  attendant/verify/PinForm.tsx        POST attendant PIN (not a query string)
   attendant/verify/DocThumb.tsx       tap-to-enlarge doc thumbnail
   api/
     lookup/route.ts
     checkout/route.ts
     release/redeem/route.ts
-    admin/reset/route.ts
+    attendant/session/route.ts      POST: attendant PIN, sets httpOnly cookie
+    admin/reset/route.ts            POST: reset, requires X-Admin-Secret
 lib/
   db.ts       JSON-backed store (data/store.json, auto-seeded)
   fees.ts     fee breakdown + USD formatting
   codes.ts    release code generator
-  stripe.ts   Stripe helper + demo-mode detection
+  stripe.ts   Stripe helper
+  security.ts timing-safe secrets, demo-release gate, PIN rate limit
   image.ts    client-side image compression
   types.ts
+middleware.ts                         strips a pin query parameter before verify renders
 data/
   impounds.json   seed records
 ```

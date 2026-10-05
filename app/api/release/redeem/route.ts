@@ -1,22 +1,38 @@
 import { NextResponse } from "next/server";
 import { redeemRelease } from "@/lib/db";
+import {
+  ATTENDANT_COOKIE,
+  attendantPin,
+  isValidAttendantSession,
+  readCookie,
+} from "@/lib/security";
 
 export const dynamic = "force-dynamic";
 
-type Body = { code?: string; pin?: string; attendant?: string };
+type Body = { code?: string; attendant?: string };
 
 export async function POST(req: Request) {
-  const { code, pin, attendant } = (await req.json()) as Body;
-  const requiredPin = process.env.ATTENDANT_PIN ?? "8421";
-  if (pin !== requiredPin) {
-    return NextResponse.json({ error: "Attendant PIN is incorrect." }, { status: 401 });
+  if (!attendantPin()) {
+    return NextResponse.json({ error: "Attendant PIN is not configured." }, { status: 503 });
   }
-  if (!code || !attendant) {
+  if (!isValidAttendantSession(readCookie(req, ATTENDANT_COOKIE))) {
+    return NextResponse.json({ error: "Attendant PIN is required." }, { status: 401 });
+  }
+
+  const { code, attendant } = (await req.json()) as Body;
+  if (!code || !attendant?.trim()) {
     return NextResponse.json({ error: "Missing fields." }, { status: 400 });
   }
-  const release = await redeemRelease(code, attendant);
-  if (!release) {
+
+  const result = await redeemRelease(code, attendant.trim());
+  if (result.status === "not_found") {
     return NextResponse.json({ error: "Release not found." }, { status: 404 });
   }
-  return NextResponse.json({ ok: true, release });
+  if (result.status === "already_released") {
+    return NextResponse.json(
+      { error: "This vehicle has already been released." },
+      { status: 409 },
+    );
+  }
+  return NextResponse.json({ ok: true, release: result.release });
 }

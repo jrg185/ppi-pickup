@@ -8,8 +8,9 @@ export default function AttendantHome() {
   const [code, setCode] = useState("");
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     const normalized = code.trim().toUpperCase();
@@ -17,9 +18,28 @@ export default function AttendantHome() {
       setError("Code format looks wrong.");
       return;
     }
-    const params = new URLSearchParams({ code: normalized });
-    if (pin) params.set("pin", pin);
-    router.push(`/attendant/verify?${params.toString()}`);
+    if (!pin) {
+      setError("Enter the attendant PIN.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch("/api/attendant/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        setError(data.error ?? "PIN rejected.");
+        return;
+      }
+      router.push(`/attendant/verify?code=${encodeURIComponent(normalized)}`);
+    } catch {
+      setError("Network error. Try again.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -51,17 +71,22 @@ export default function AttendantHome() {
             </label>
             <input
               id="pin"
+              type="password"
               value={pin}
               onChange={(e) => setPin(e.target.value)}
               className="input"
               inputMode="numeric"
-              pattern="[0-9]*"
               autoComplete="off"
+              required
             />
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
-          <button type="submit" className="btn-primary w-full justify-center">
-            Verify release
+          <button
+            type="submit"
+            disabled={loading}
+            className="btn-primary w-full justify-center"
+          >
+            {loading ? "Checking\u2026" : "Verify release"}
           </button>
         </form>
       </div>
@@ -73,7 +98,8 @@ export default function AttendantHome() {
         <p className="mt-2 text-sm text-valor-steel">
           QR codes issued to customers link directly to this verification page with the code
           embedded &mdash; open your phone&rsquo;s camera, point at the customer&rsquo;s screen,
-          and tap the notification.
+          and tap the notification. You will be asked for the attendant PIN. It is submitted
+          with the request and is not added to the page address.
         </p>
       </div>
     </div>

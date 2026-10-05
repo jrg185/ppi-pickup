@@ -71,6 +71,7 @@ const K = {
   releaseDocs: (code: string) => `valor:release_docs:${code}`,
   releaseBySession: (sid: string) => `valor:release_by_session:${sid}`,
   releaseCodes: "valor:release_codes",
+  activeRelease: (impoundId: string) => `valor:active_release:${impoundId}`,
   pending: (id: string) => `valor:pending:${id}`,
   pendingIds: "valor:pending_ids",
 };
@@ -113,8 +114,38 @@ async function kvLoadRelease(code: string): Promise<Release | null> {
 }
 
 async function kvDeleteRelease(code: string): Promise<void> {
+  const meta = await kv.get<ReleaseMeta>(K.release(code));
+  if (meta?.impoundId) {
+    const active = await kv.get<string>(K.activeRelease(meta.impoundId));
+    if (!active || active === code) await kv.del(K.activeRelease(meta.impoundId));
+  }
+  if (meta?.stripeSessionId) await kv.del(K.releaseBySession(meta.stripeSessionId));
   await kv.del(K.release(code), K.releaseDocs(code));
   await kv.srem(K.releaseCodes, code);
+}
+
+/** Unredeemed release for an impound, if one exists. */
+async function kvFindActive(impoundId: string): Promise<Release | null> {
+  const indexed = await kv.get<string>(K.activeRelease(impoundId));
+  if (indexed) {
+    const indexedRelease = await kvLoadRelease(indexed);
+    if (
+      indexedRelease &&
+      !indexedRelease.redeemedAt &&
+      indexedRelease.impoundId === impoundId
+    ) {
+      return indexedRelease;
+    }
+  }
+  const codes = ((await kv.smembers(K.releaseCodes)) as string[] | null) ?? [];
+  for (const code of codes) {
+    if (code === indexed) continue;
+    const meta = await kv.get<ReleaseMeta>(K.release(code));
+    if (meta && meta.impoundId === impoundId && !meta.redeemedAt) {
+      return kvLoadRelease(code);
+    }
+  }
+  return null;
 }
 
 // ---------- Public API ----------
@@ -143,14 +174,71 @@ export async function getImpound(id: string): Promise<Impound | null> {
   return impounds.find((i) => i.id === id) ?? null;
 }
 
-export async function createRelease(release: Release): Promise<void> {
-  if (useKV()) {
-    await kvStoreRelease(release);
-    return;
-  }
+export type CreateReleaseResult = "created" | "already_released" | "active_exists";
+
+export async function findActiveRelease(impoundId: string): Promise<Release | null> {
+  if (useKV()) return kvFindActive(impoundId);
+  const found = fileRead().releases.find(
+    (r) => r.impoundId === impoundId && !r.redeemedAt,
+  );
+  return found ?? null;
+}
+
+export async function createRelease(release: Release): Promise<CreateReleaseResult> {
+  if (useKV()) return kvCreateRelease(release);
   const s = fileRead();
+  const imp = s.impounds.find((i) => i.id === release.impoundId);
+  if (!imp || imp.status === "released") return "already_released";
+  if (s.releases.some((r) => r.impoundId === release.impoundId && !r.redeemedAt)) {
+    return "active_exists";
+  }
   s.releases.push(release);
   fileWrite(s);
+  return "created";
+}
+
+const CLEAR_ACTIVE_IF_VALUE = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+end
+return 0
+`;
+
+async function clearActiveIf(impoundId: string, code: string): Promise<void> {
+  await kv.eval(CLEAR_ACTIVE_IF_VALUE, [K.activeRelease(impoundId)], [code]);
+}
+
+async function claimActiveRelease(impoundId: string, code: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const claimed = await kv.set(K.activeRelease(impoundId), code, { nx: true });
+    if (claimed) return true;
+    const holderCode = await kv.get<string>(K.activeRelease(impoundId));
+    if (!holderCode) continue;
+    const holder = await kvLoadRelease(holderCode);
+    if (holder && !holder.redeemedAt) return false;
+    await clearActiveIf(impoundId, holderCode);
+  }
+  return false;
+}
+
+async function kvCreateRelease(release: Release): Promise<CreateReleaseResult> {
+  const impounds = await kvGetImpounds();
+  const imp = impounds.find((i) => i.id === release.impoundId);
+  if (!imp || imp.status === "released") return "already_released";
+
+  const existing = await kvFindActive(release.impoundId);
+  if (existing) return "active_exists";
+
+  const claimed = await claimActiveRelease(release.impoundId, release.code);
+  if (!claimed) return "active_exists";
+
+  try {
+    await kvStoreRelease(release);
+  } catch (err) {
+    await clearActiveIf(release.impoundId, release.code);
+    throw err;
+  }
+  return "created";
 }
 
 export async function getRelease(code: string): Promise<Release | null> {
@@ -172,38 +260,47 @@ export async function getReleaseBySession(
   return s.releases.find((r) => r.stripeSessionId === sessionId) ?? null;
 }
 
-export async function redeemRelease(
-  code: string,
-  attendant: string,
-): Promise<Release | null> {
+export type RedeemResult =
+  | { status: "redeemed"; release: Release }
+  | { status: "not_found" }
+  | { status: "already_released" };
+
+export async function redeemRelease(code: string, attendant: string): Promise<RedeemResult> {
   const key = code.toUpperCase();
-  if (useKV()) {
-    const release = await kvLoadRelease(key);
-    if (!release) return null;
-    if (release.redeemedAt) return release;
-    release.redeemedAt = new Date().toISOString();
-    release.redeemedBy = attendant;
-    // Persist the metadata update (docs are unchanged).
-    const { docs: _docs, ...meta } = release;
-    await kv.set(K.release(key), meta);
-    const impounds = await kvGetImpounds();
-    const idx = impounds.findIndex((i) => i.id === release.impoundId);
-    if (idx >= 0) {
-      impounds[idx] = { ...impounds[idx], status: "released" };
-      await kvSetImpounds(impounds);
-    }
-    return release;
-  }
+  if (useKV()) return kvRedeem(key, attendant);
+
   const s = fileRead();
   const release = s.releases.find((r) => r.code === key);
-  if (!release) return null;
-  if (release.redeemedAt) return release;
+  if (!release) return { status: "not_found" };
+  if (release.redeemedAt) return { status: "already_released" };
+  const imp = s.impounds.find((i) => i.id === release.impoundId);
+  if (imp?.status === "released") return { status: "already_released" };
   release.redeemedAt = new Date().toISOString();
   release.redeemedBy = attendant;
-  const imp = s.impounds.find((i) => i.id === release.impoundId);
   if (imp) imp.status = "released";
   fileWrite(s);
-  return release;
+  return { status: "redeemed", release };
+}
+
+async function kvRedeem(key: string, attendant: string): Promise<RedeemResult> {
+  const release = await kvLoadRelease(key);
+  if (!release) return { status: "not_found" };
+  if (release.redeemedAt) return { status: "already_released" };
+  const impounds = await kvGetImpounds();
+  const idx = impounds.findIndex((i) => i.id === release.impoundId);
+  if (idx >= 0 && impounds[idx].status === "released") {
+    return { status: "already_released" };
+  }
+  release.redeemedAt = new Date().toISOString();
+  release.redeemedBy = attendant;
+  const { docs: _docs, ...meta } = release;
+  await kv.set(K.release(key), meta);
+  if (idx >= 0) {
+    impounds[idx] = { ...impounds[idx], status: "released" };
+    await kvSetImpounds(impounds);
+  }
+  await clearActiveIf(release.impoundId, key);
+  return { status: "redeemed", release };
 }
 
 export async function createPendingPickup(p: PendingPickup): Promise<void> {
