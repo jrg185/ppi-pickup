@@ -36,14 +36,14 @@ A self-service web portal for customers retrieving vehicles impounded from priva
 ### Attendant Flow
 
 1. **Attendant console** (`/attendant`) — text input for release code + attendant PIN. QR codes issued to customers encode a direct URL to the verify page, so scanning with a phone camera opens it directly.
-2. **PIN gate** — shared PIN from `ATTENDANT_PIN`. There is no default; if the variable is unset the console stays locked. The PIN is submitted with POST to `/api/attendant/session` and stored in an httpOnly cookie. It is never put in the URL. If a `pin` query parameter is present, middleware redirects to the same page without it. Failed attempts are rate limited.
+2. **PIN gate** — shared PIN from `ATTENDANT_PIN`. There is no default; if the variable is unset the console stays locked. The PIN is submitted with POST to `/api/attendant/session`. Success stores an opaque random session id (not HMAC of the PIN) in an httpOnly cookie and in the server store with an 8-hour TTL. It is never put in the URL. If a `pin` query parameter is present, middleware redirects to the same page without it. Failed PIN posts and invalid cookies share a rate limit.
 3. **Verify page** — shows:
    - Vehicle details (plate, VIN, year/make/model/color)
    - Customer name, phone, payment amount, payment timestamp
    - **Two document thumbnails** (Photo ID + Ownership) — tap to view full size
    - Yellow SOP reminder: "Before releasing: confirm (1) person matches photo ID, (2) name on ID matches ownership document, (3) vehicle on lot matches plate and VIN"
    - Attendant name/badge input + "Release vehicle" button
-4. **Redemption** — one active (unredeemed) release per impound. A second code is not issued while one is outstanding or after the impound is released. Redeem rejects a code that was already redeemed and rejects any code once the vehicle is released. After release, the page shows "Already released" with who released it and when. Re-scanning the QR or re-looking-up the plate shows the vehicle as already released.
+4. **Redemption** — one active (unredeemed) release per impound. Stripe checkout claims a 1-hour checkout lock before creating a Checkout Session, so a second payer cannot start payment for the same vehicle. A second code is not issued while one is outstanding, while a checkout is locked, or after the impound is released. Redeem rejects a code that was already redeemed and rejects any code once the vehicle is released. After release, the page shows "Already released" with who released it and when. Re-scanning the QR or re-looking-up the plate shows the vehicle as already released.
 
 ### Admin
 
@@ -162,6 +162,8 @@ The data layer (`lib/db.ts`) must support two backends behind the same async int
    - `valor:release_by_session:<SESSION_ID>` — maps Stripe session to release code
    - `valor:release_codes` — set of all release codes (for reset cleanup)
    - `valor:active_release:<IMPOUND_ID>` — code of the single unredeemed release for that impound
+   - `valor:checkout_lock:<IMPOUND_ID>` — pickupId holding the in-progress Stripe checkout (1-hour TTL)
+   - `valor:attendant_session:<TOKEN_HASH>` — opaque attendant session (8-hour TTL)
    - `valor:pending:<ID>` — pending pickup (1-hour TTL)
    - `valor:pending_ids` — set of pending IDs
    - `valor:seeded` — boolean flag for auto-seeding
@@ -177,7 +179,8 @@ All public db functions are async. The backend is chosen at call time via `Boole
 - Metadata carries `pickupId` and `impoundId`.
 - Success URL: `/pickup/success?session_id={CHECKOUT_SESSION_ID}`
 - Cancel URL: `/pickup/{impoundId}` (back to the review page)
-- On the success page, the app retrieves the Stripe session, confirms `payment_status === "paid"`, consumes the pending pickup, and creates the release. Creation is refused when that impound already has an active release or is already released.
+- Before creating the Checkout Session the app atomically claims `valor:checkout_lock:<impoundId>` for that `pickupId` (1-hour TTL). A second checkout for the same vehicle is rejected until the lock expires or is converted into the active release.
+- On the success page, the app retrieves the Stripe session, confirms `payment_status === "paid"`, consumes the pending pickup, and creates the release only if this `pickupId` still holds the lock (or the lock expired and no other release exists). Creation is refused when that impound already has an active release, a foreign checkout lock, or is already released.
 - **Local demo**: when `STRIPE_SECRET_KEY` is unset, checkout may create a release immediately only if the process is not production, not Vercel, and the request host is loopback. Otherwise checkout returns an error and does not issue a code.
 
 ---
@@ -213,7 +216,7 @@ Fee structure per vehicle: towing ($195-210), storage ($65-75/day), admin ($25).
 | `STRIPE_SECRET_KEY` | Yes on public deploys | unset allows unpaid codes on loopback dev only | Stripe test secret key |
 | `STRIPE_PUBLISHABLE_KEY` | No | — | Not currently used (Checkout is server-side redirect) |
 | `NEXT_PUBLIC_BASE_URL` | Yes (Vercel) | `http://localhost:3000` | Used for QR code URLs and Stripe redirects. A non-local value disables unpaid demo codes |
-| `ATTENDANT_PIN` | Yes | (none) | Attendant PIN. No default. Submitted via POST, never in the URL |
+| `ATTENDANT_PIN` | Yes | (none) | Attendant PIN. No default. Submitted via POST, never in the URL. Session cookie is a stored random token, not derived from the PIN |
 | `ADMIN_RESET_SECRET` | Yes to reset | (unset disables reset) | Compared timing-safely to the `X-Admin-Secret` header |
 | `KV_REST_API_URL` | Auto (Vercel) | — | Injected by Vercel when KV is attached |
 | `KV_REST_API_TOKEN` | Auto (Vercel) | — | Injected by Vercel when KV is attached |
@@ -235,16 +238,16 @@ app/
   attendant/verify/RedeemButton.tsx   Release button (client component)
   api/
     lookup/route.ts                   POST: find impound by plate/VIN/ID
-    checkout/route.ts                 POST: create Stripe session; unpaid demo only on loopback dev
+    checkout/route.ts                 POST: lock impound, then create Stripe session; unpaid demo only on loopback dev
     release/redeem/route.ts           POST: mark release as redeemed (rejects already released)
-    attendant/session/route.ts        POST: check attendant PIN, set httpOnly cookie
+    attendant/session/route.ts        POST: check attendant PIN, set opaque httpOnly session cookie
     admin/reset/route.ts              POST: reset all data; requires X-Admin-Secret
 lib/
   db.ts        Dual-backend storage (file + Vercel KV)
   fees.ts      Fee calculation + USD formatting
   codes.ts     Release code generator
   stripe.ts    Stripe client + demo-mode detection
-  security.ts  timing-safe secret compare, public demo gate, PIN session + rate limit
+  security.ts  timing-safe secret compare, public demo gate, opaque PIN sessions + rate limit
   image.ts     Client-side image compression utility
 middleware.ts  Redirects /attendant/verify?pin=... to the same path without pin
   types.ts     TypeScript types

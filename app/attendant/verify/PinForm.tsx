@@ -47,7 +47,6 @@ export default function PinForm({ code }: { code: string }) {
           name="pin"
           type="password"
           className="input"
-          inputMode="numeric"
           autoComplete="off"
           value={pin}
           onChange={(e) => setPin(e.target.value)}

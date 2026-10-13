@@ -1,9 +1,19 @@
 import Link from "next/link";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { getImpound, getRelease } from "@/lib/db";
 import { formatUSD } from "@/lib/fees";
-import { ATTENDANT_COOKIE, attendantPin, isValidAttendantSession } from "@/lib/security";
+import {
+  ATTENDANT_COOKIE,
+  PIN_ATTEMPT_LIMIT,
+  PIN_ATTEMPT_WINDOW_MS,
+  attendantPin,
+  clientIpFromHeaders,
+  isValidAttendantSession,
+  pinAttemptBucket,
+  rateLimitStatus,
+  recordRateLimitFailure,
+} from "@/lib/security";
 import DocThumb from "./DocThumb";
 import PinForm from "./PinForm";
 import RedeemButton from "./RedeemButton";
@@ -50,9 +60,23 @@ export default async function AttendantVerify({
   }
 
   // PIN is posted to /api/attendant/session and kept in an httpOnly cookie.
-  // A PIN in the query string is ignored so it never lives in the URL.
+  // The cookie is an opaque stored session, not HMAC(PIN).
+  const bucket = pinAttemptBucket(clientIpFromHeaders(headers()));
+  const limit = rateLimitStatus(bucket, PIN_ATTEMPT_LIMIT, PIN_ATTEMPT_WINDOW_MS);
+  if (limit.blocked) {
+    return (
+      <div className="card">
+        <h1 className="text-xl font-bold">Too many attempts</h1>
+        <p className="mt-2 text-sm text-valor-steel">
+          Try again in {limit.retryAfterSec} seconds.
+        </p>
+      </div>
+    );
+  }
+
   const token = cookies().get(ATTENDANT_COOKIE)?.value;
-  if (!isValidAttendantSession(token)) {
+  if (!(await isValidAttendantSession(token))) {
+    if (token) recordRateLimitFailure(bucket, PIN_ATTEMPT_WINDOW_MS);
     return <PinForm code={code} />;
   }
 

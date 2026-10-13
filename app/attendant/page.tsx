@@ -75,7 +75,6 @@ export default function AttendantHome() {
               value={pin}
               onChange={(e) => setPin(e.target.value)}
               className="input"
-              inputMode="numeric"
               autoComplete="off"
               required
             />

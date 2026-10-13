@@ -35,20 +35,23 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   if (!pending) return null;
 
   const code = generateReleaseCode();
-  const created = await createRelease({
-    code,
-    impoundId,
-    customerName: pending.customerName,
-    customerPhone: pending.customerPhone,
-    docs: pending.docs,
-    amountPaidCents: session.amount_total ?? 0,
-    paidAt: new Date().toISOString(),
-    issuedAt: new Date().toISOString(),
-    redeemedAt: null,
-    redeemedBy: null,
-    stripeSessionId: session.id,
-    demo: false,
-  });
+  const created = await createRelease(
+    {
+      code,
+      impoundId,
+      customerName: pending.customerName,
+      customerPhone: pending.customerPhone,
+      docs: pending.docs,
+      amountPaidCents: session.amount_total ?? 0,
+      paidAt: new Date().toISOString(),
+      issuedAt: new Date().toISOString(),
+      redeemedAt: null,
+      redeemedBy: null,
+      stripeSessionId: session.id,
+      demo: false,
+    },
+    { pickupId },
+  );
   if (created !== "created") {
     const again = await getReleaseBySession(session.id);
     return again?.code ?? null;

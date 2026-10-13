@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { resetStore } from "./db";
 import {
   adminResetAuthorized,
   attendantPin,
+  hashAttendantSessionToken,
+  isValidAttendantSession,
+  issueAttendantSession,
   pinMatches,
   rateLimitStatus,
   recordRateLimitFailure,
   unpaidDemoReleaseAllowed,
 } from "./security";
+
+const STORE_PATH = path.join(process.cwd(), "data", "store.json");
 
 function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
   const previous = new Map<string, string | undefined>();
@@ -18,6 +27,26 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
   }
   try {
     fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function withEnvAsync(
+  vars: Record<string, string | undefined>,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(vars)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    await fn();
   } finally {
     for (const [key, value] of previous) {
       if (value === undefined) delete process.env[key];
@@ -125,6 +154,32 @@ test("unpaid demo releases are refused unless loopback dev", () => {
       assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), false);
     },
   );
+});
+
+test("attendant session cookies are random and not HMAC(PIN)", async (t) => {
+  if (process.env.KV_REST_API_URL) {
+    t.skip("file-store session assertions do not run against Vercel KV");
+    return;
+  }
+  fs.rmSync(STORE_PATH, { force: true });
+  await resetStore();
+
+  await withEnvAsync({ ATTENDANT_PIN: "8421" }, async () => {
+    const forged = createHmac("sha256", "8421")
+      .update("valor-attendant-session-v1")
+      .digest("base64url");
+    assert.equal(await isValidAttendantSession(forged), false);
+    assert.equal(await isValidAttendantSession("not-a-real-token"), false);
+
+    const a = await issueAttendantSession();
+    const b = await issueAttendantSession();
+    assert.notEqual(a, b);
+    assert.notEqual(hashAttendantSessionToken(a), hashAttendantSessionToken("8421"));
+    assert.equal(await isValidAttendantSession(a), true);
+    assert.equal(await isValidAttendantSession(b), true);
+  });
+
+  fs.rmSync(STORE_PATH, { force: true });
 });
 
 test("PIN attempts are rate limited", () => {
