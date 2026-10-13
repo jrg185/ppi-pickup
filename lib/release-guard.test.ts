@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { createRelease, findActiveRelease, redeemRelease, resetStore } from "./db";
+import {
+  createRelease,
+  findActiveRelease,
+  getCheckoutLock,
+  redeemRelease,
+  reserveCheckout,
+  resetStore,
+} from "./db";
 import type { Release } from "./types";
 
 const STORE_PATH = path.join(process.cwd(), "data", "store.json");
@@ -46,6 +53,47 @@ test("one active release per impound; redeem rejects an already released vehicle
   raw.releases.push(sample("QRST-2345"));
   fs.writeFileSync(STORE_PATH, JSON.stringify(raw));
   assert.equal((await redeemRelease("QRST-2345", "badge-7")).status, "already_released");
+
+  fs.rmSync(STORE_PATH, { force: true });
+});
+
+test("checkout lock is exclusive until converted or expired", async (t) => {
+  if (process.env.KV_REST_API_URL) {
+    t.skip("file-store assertions do not run against Vercel KV");
+    return;
+  }
+  fs.rmSync(STORE_PATH, { force: true });
+  await resetStore();
+
+  assert.equal(await reserveCheckout("IMP-24082", "pickup_alice"), "reserved");
+  assert.equal(await getCheckoutLock("IMP-24082"), "pickup_alice");
+  assert.equal(await reserveCheckout("IMP-24082", "pickup_attacker"), "locked");
+  assert.equal(
+    await createRelease(sample("EFGH-2222", "IMP-24082"), { pickupId: "pickup_attacker" }),
+    "active_exists",
+  );
+  assert.equal(
+    await createRelease(sample("WXYZ-2222", "IMP-24082")),
+    "active_exists",
+  );
+  assert.equal(
+    await createRelease(sample("ABCD-2222", "IMP-24082"), { pickupId: "pickup_alice" }),
+    "created",
+  );
+  assert.equal(await getCheckoutLock("IMP-24082"), null);
+  assert.equal(await reserveCheckout("IMP-24082", "pickup_late"), "active_exists");
+
+  fs.rmSync(STORE_PATH, { force: true });
+  await resetStore();
+  assert.equal(await reserveCheckout("IMP-24083", "pickup_stale"), "reserved");
+  const raw = JSON.parse(fs.readFileSync(STORE_PATH, "utf8")) as {
+    checkoutLocks: Record<string, { pickupId: string; expiresAt: number }>;
+  };
+  raw.checkoutLocks["IMP-24083"].expiresAt = Date.now() - 1;
+  fs.writeFileSync(STORE_PATH, JSON.stringify(raw));
+  assert.equal(await getCheckoutLock("IMP-24083"), null);
+  assert.equal(await reserveCheckout("IMP-24083", "pickup_fresh"), "reserved");
+  assert.equal(await getCheckoutLock("IMP-24083"), "pickup_fresh");
 
   fs.rmSync(STORE_PATH, { force: true });
 });

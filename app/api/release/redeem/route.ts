@@ -2,9 +2,15 @@ import { NextResponse } from "next/server";
 import { redeemRelease } from "@/lib/db";
 import {
   ATTENDANT_COOKIE,
+  PIN_ATTEMPT_LIMIT,
+  PIN_ATTEMPT_WINDOW_MS,
   attendantPin,
+  clientIp,
   isValidAttendantSession,
+  pinAttemptBucket,
+  rateLimitStatus,
   readCookie,
+  recordRateLimitFailure,
 } from "@/lib/security";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +21,19 @@ export async function POST(req: Request) {
   if (!attendantPin()) {
     return NextResponse.json({ error: "Attendant PIN is not configured." }, { status: 503 });
   }
-  if (!isValidAttendantSession(readCookie(req, ATTENDANT_COOKIE))) {
+
+  const bucket = pinAttemptBucket(clientIp(req));
+  const limit = rateLimitStatus(bucket, PIN_ATTEMPT_LIMIT, PIN_ATTEMPT_WINDOW_MS);
+  if (limit.blocked) {
+    return NextResponse.json(
+      { error: "Too many PIN attempts. Try again later." },
+      { status: 429, headers: { "Retry-After": String(limit.retryAfterSec) } },
+    );
+  }
+
+  const token = readCookie(req, ATTENDANT_COOKIE);
+  if (!(await isValidAttendantSession(token))) {
+    if (token) recordRateLimitFailure(bucket, PIN_ATTEMPT_WINDOW_MS);
     return NextResponse.json({ error: "Attendant PIN is required." }, { status: 401 });
   }
 

@@ -1,5 +1,6 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { isDemoMode } from "@/lib/stripe";
+import { lookupAttendantSession, persistAttendantSession } from "@/lib/db";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -66,15 +67,30 @@ export function attendantPin(): string | null {
 }
 
 export const ATTENDANT_COOKIE = "valor_attendant";
+export const ATTENDANT_SESSION_TTL_SEC = 8 * 60 * 60;
 
-export function attendantSessionToken(pin: string): string {
-  return createHmac("sha256", pin).update("valor-attendant-session-v1").digest("base64url");
+/** Opaque cookie value — 32 random bytes, not derived from the PIN. */
+export function mintAttendantSessionToken(): string {
+  return randomBytes(32).toString("base64url");
 }
 
-export function isValidAttendantSession(token: string | undefined | null): boolean {
+export function hashAttendantSessionToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export async function issueAttendantSession(): Promise<string> {
+  const token = mintAttendantSessionToken();
+  await persistAttendantSession(hashAttendantSessionToken(token), ATTENDANT_SESSION_TTL_SEC);
+  return token;
+}
+
+export async function isValidAttendantSession(
+  token: string | undefined | null,
+): Promise<boolean> {
   const pin = attendantPin();
   if (!pin || !token) return false;
-  return timingSafeEqualString(token, attendantSessionToken(pin));
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) return false;
+  return lookupAttendantSession(hashAttendantSessionToken(token));
 }
 
 export function pinMatches(provided: string): boolean {
@@ -83,13 +99,19 @@ export function pinMatches(provided: string): boolean {
   return timingSafeEqualString(provided, pin);
 }
 
-export function clientIp(req: Request): string {
-  const fwd = req.headers.get("x-forwarded-for");
+type HeaderGetter = { get(name: string): string | null };
+
+export function clientIpFromHeaders(h: HeaderGetter): string {
+  const fwd = h.get("x-forwarded-for");
   if (fwd) {
     const first = fwd.split(",")[0]?.trim();
     if (first) return first;
   }
-  return req.headers.get("x-real-ip")?.trim() || "unknown";
+  return h.get("x-real-ip")?.trim() || "unknown";
+}
+
+export function clientIp(req: Request): string {
+  return clientIpFromHeaders(req.headers);
 }
 
 type Bucket = { count: number; resetAt: number };
@@ -133,6 +155,10 @@ export function recordRateLimitFailure(key: string, windowMs: number): void {
 
 export const PIN_ATTEMPT_LIMIT = 5;
 export const PIN_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
+
+export function pinAttemptBucket(ip: string): string {
+  return `attendant-pin:${ip}`;
+}
 
 export function readCookie(req: Request, name: string): string | undefined {
   const raw = req.headers.get("cookie");

@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import {
   ATTENDANT_COOKIE,
+  ATTENDANT_SESSION_TTL_SEC,
   PIN_ATTEMPT_LIMIT,
   PIN_ATTEMPT_WINDOW_MS,
   attendantPin,
-  attendantSessionToken,
   clientIp,
+  issueAttendantSession,
+  pinAttemptBucket,
   pinMatches,
   rateLimitStatus,
   recordRateLimitFailure,
@@ -19,7 +21,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Attendant PIN is not configured." }, { status: 503 });
   }
 
-  const bucket = `attendant-pin:${clientIp(req)}`;
+  const bucket = pinAttemptBucket(clientIp(req));
   const limit = rateLimitStatus(bucket, PIN_ATTEMPT_LIMIT, PIN_ATTEMPT_WINDOW_MS);
   if (limit.blocked) {
     return NextResponse.json(
@@ -41,13 +43,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Attendant PIN is incorrect." }, { status: 401 });
   }
 
+  const token = await issueAttendantSession();
   const res = NextResponse.json({ ok: true });
-  res.cookies.set(ATTENDANT_COOKIE, attendantSessionToken(pin), {
+  res.cookies.set(ATTENDANT_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: 60 * 60 * 8,
+    maxAge: ATTENDANT_SESSION_TTL_SEC,
   });
   return res;
 }

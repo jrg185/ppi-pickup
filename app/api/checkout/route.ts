@@ -1,5 +1,14 @@
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import { createPendingPickup, createRelease, findActiveRelease, getImpound } from "@/lib/db";
+import {
+  createPendingPickup,
+  createRelease,
+  findActiveRelease,
+  getCheckoutLock,
+  getImpound,
+  releaseCheckout,
+  reserveCheckout,
+} from "@/lib/db";
 import { computeFees } from "@/lib/fees";
 import { generateReleaseCode } from "@/lib/codes";
 import { baseUrl, getStripe } from "@/lib/stripe";
@@ -50,6 +59,12 @@ export async function POST(req: Request) {
       { status: 409 },
     );
   }
+  if (await getCheckoutLock(impound.id)) {
+    return NextResponse.json(
+      { error: "A payment is already in progress for this vehicle." },
+      { status: 409 },
+    );
+  }
   const fees = computeFees(impound);
 
   // Unpaid demo codes exist only for loopback development. Public and
@@ -93,38 +108,54 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Payment processor misconfigured." }, { status: 500 });
   }
 
-  // Stash docs server-side keyed by a pickupId; attach id to the Stripe session
-  // metadata so the success page can finalize the release.
-  const pickupId = `pickup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  await createPendingPickup({
-    id: pickupId,
-    impoundId: impound.id,
-    customerName: name,
-    customerPhone: phone,
-    docs,
-    createdAt: new Date().toISOString(),
-  });
+  // Claim the impound before sending the customer to Stripe so a second
+  // payer cannot bind the same vehicle after both have been charged.
+  const pickupId = `pickup_${randomBytes(12).toString("hex")}`;
+  const reserved = await reserveCheckout(impound.id, pickupId);
+  if (reserved === "already_released") {
+    return NextResponse.json({ error: "Vehicle already released." }, { status: 409 });
+  }
+  if (reserved !== "reserved") {
+    return NextResponse.json(
+      { error: "A payment is already in progress for this vehicle." },
+      { status: 409 },
+    );
+  }
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    payment_method_types: ["card"],
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: "usd",
-          unit_amount: fees.total,
-          product_data: {
-            name: `Valor impound release - ${impound.year} ${impound.make} ${impound.model}`,
-            description: `Plate ${impound.plate} (${impound.state}) \u2022 Impound ${impound.id}`,
+  try {
+    await createPendingPickup({
+      id: pickupId,
+      impoundId: impound.id,
+      customerName: name,
+      customerPhone: phone,
+      docs,
+      createdAt: new Date().toISOString(),
+    });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: "usd",
+            unit_amount: fees.total,
+            product_data: {
+              name: `Valor impound release - ${impound.year} ${impound.make} ${impound.model}`,
+              description: `Plate ${impound.plate} (${impound.state}) \u2022 Impound ${impound.id}`,
+            },
           },
         },
-      },
-    ],
-    metadata: { pickupId, impoundId: impound.id },
-    success_url: `${baseUrl()}/pickup/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${baseUrl()}/pickup/${impound.id}`,
-  });
+      ],
+      metadata: { pickupId, impoundId: impound.id },
+      success_url: `${baseUrl()}/pickup/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl()}/pickup/${impound.id}`,
+    });
 
-  return NextResponse.json({ url: session.url });
+    return NextResponse.json({ url: session.url });
+  } catch (err) {
+    await releaseCheckout(impound.id, pickupId);
+    throw err;
+  }
 }

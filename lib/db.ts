@@ -37,15 +37,32 @@ function readSeed(): Impound[] {
 
 // ---------- File backend ----------
 
+type CheckoutLock = { pickupId: string; expiresAt: number };
+type StoredSession = { tokenHash: string; expiresAt: number };
+
 type FileStore = {
   impounds: Impound[];
   releases: Release[];
   pending: PendingPickup[];
+  checkoutLocks: Record<string, CheckoutLock>;
+  attendantSessions: StoredSession[];
 };
+
+export const CHECKOUT_LOCK_TTL_SEC = 3600;
+
+function emptyStore(): FileStore {
+  return {
+    impounds: readSeed(),
+    releases: [],
+    pending: [],
+    checkoutLocks: {},
+    attendantSessions: [],
+  };
+}
 
 function fileRead(): FileStore {
   if (!fs.existsSync(STORE_PATH)) {
-    const s: FileStore = { impounds: readSeed(), releases: [], pending: [] };
+    const s = emptyStore();
     fs.writeFileSync(STORE_PATH, JSON.stringify(s, null, 2));
     return s;
   }
@@ -55,6 +72,8 @@ function fileRead(): FileStore {
     impounds: p.impounds ?? [],
     releases: p.releases ?? [],
     pending: p.pending ?? [],
+    checkoutLocks: p.checkoutLocks ?? {},
+    attendantSessions: p.attendantSessions ?? [],
   };
 }
 
@@ -74,6 +93,9 @@ const K = {
   activeRelease: (impoundId: string) => `valor:active_release:${impoundId}`,
   pending: (id: string) => `valor:pending:${id}`,
   pendingIds: "valor:pending_ids",
+  checkoutLock: (impoundId: string) => `valor:checkout_lock:${impoundId}`,
+  attendantSession: (hash: string) => `valor:attendant_session:${hash}`,
+  attendantSessionIds: "valor:attendant_sessions",
 };
 
 async function kvEnsureSeeded(): Promise<void> {
@@ -175,6 +197,12 @@ export async function getImpound(id: string): Promise<Impound | null> {
 }
 
 export type CreateReleaseResult = "created" | "already_released" | "active_exists";
+export type CreateReleaseOpts = { pickupId?: string };
+export type ReserveCheckoutResult =
+  | "reserved"
+  | "already_released"
+  | "active_exists"
+  | "locked";
 
 export async function findActiveRelease(impoundId: string): Promise<Release | null> {
   if (useKV()) return kvFindActive(impoundId);
@@ -184,13 +212,97 @@ export async function findActiveRelease(impoundId: string): Promise<Release | nu
   return found ?? null;
 }
 
-export async function createRelease(release: Release): Promise<CreateReleaseResult> {
-  if (useKV()) return kvCreateRelease(release);
+function fileLockHeld(s: FileStore, impoundId: string, now = Date.now()): CheckoutLock | null {
+  const lock = s.checkoutLocks[impoundId];
+  if (!lock || lock.expiresAt <= now) return null;
+  return lock;
+}
+
+export async function getCheckoutLock(impoundId: string): Promise<string | null> {
+  if (useKV()) {
+    const holder = await kv.get<string>(K.checkoutLock(impoundId));
+    return holder ?? null;
+  }
+  const lock = fileLockHeld(fileRead(), impoundId);
+  return lock?.pickupId ?? null;
+}
+
+export async function reserveCheckout(
+  impoundId: string,
+  pickupId: string,
+): Promise<ReserveCheckoutResult> {
+  if (useKV()) return kvReserveCheckout(impoundId, pickupId);
+
+  const s = fileRead();
+  const imp = s.impounds.find((i) => i.id === impoundId);
+  if (!imp || imp.status === "released") return "already_released";
+  if (s.releases.some((r) => r.impoundId === impoundId && !r.redeemedAt)) {
+    return "active_exists";
+  }
+  const now = Date.now();
+  const lock = fileLockHeld(s, impoundId, now);
+  if (lock && lock.pickupId !== pickupId) return "locked";
+  s.checkoutLocks[impoundId] = {
+    pickupId,
+    expiresAt: now + CHECKOUT_LOCK_TTL_SEC * 1000,
+  };
+  fileWrite(s);
+  return "reserved";
+}
+
+export async function releaseCheckout(impoundId: string, pickupId: string): Promise<void> {
+  if (useKV()) {
+    await kv.eval(CLEAR_ACTIVE_IF_VALUE, [K.checkoutLock(impoundId)], [pickupId]);
+    return;
+  }
+  const s = fileRead();
+  if (s.checkoutLocks[impoundId]?.pickupId === pickupId) {
+    delete s.checkoutLocks[impoundId];
+    fileWrite(s);
+  }
+}
+
+export async function persistAttendantSession(
+  tokenHash: string,
+  ttlSec: number,
+): Promise<void> {
+  if (useKV()) {
+    await kv.set(K.attendantSession(tokenHash), "1", { ex: ttlSec });
+    await kv.sadd(K.attendantSessionIds, tokenHash);
+    return;
+  }
+  const s = fileRead();
+  const now = Date.now();
+  s.attendantSessions = s.attendantSessions.filter((row) => row.expiresAt > now);
+  s.attendantSessions.push({ tokenHash, expiresAt: now + ttlSec * 1000 });
+  fileWrite(s);
+}
+
+export async function lookupAttendantSession(tokenHash: string): Promise<boolean> {
+  if (useKV()) {
+    return Boolean(await kv.get<string>(K.attendantSession(tokenHash)));
+  }
+  const now = Date.now();
+  return fileRead().attendantSessions.some(
+    (row) => row.tokenHash === tokenHash && row.expiresAt > now,
+  );
+}
+
+export async function createRelease(
+  release: Release,
+  opts?: CreateReleaseOpts,
+): Promise<CreateReleaseResult> {
+  if (useKV()) return kvCreateRelease(release, opts);
   const s = fileRead();
   const imp = s.impounds.find((i) => i.id === release.impoundId);
   if (!imp || imp.status === "released") return "already_released";
   if (s.releases.some((r) => r.impoundId === release.impoundId && !r.redeemedAt)) {
     return "active_exists";
+  }
+  const lock = fileLockHeld(s, release.impoundId);
+  if (lock && lock.pickupId !== opts?.pickupId) return "active_exists";
+  if (lock && opts?.pickupId === lock.pickupId) {
+    delete s.checkoutLocks[release.impoundId];
   }
   s.releases.push(release);
   fileWrite(s);
@@ -221,13 +333,52 @@ async function claimActiveRelease(impoundId: string, code: string): Promise<bool
   return false;
 }
 
-async function kvCreateRelease(release: Release): Promise<CreateReleaseResult> {
+async function kvReserveCheckout(
+  impoundId: string,
+  pickupId: string,
+): Promise<ReserveCheckoutResult> {
+  const impounds = await kvGetImpounds();
+  const imp = impounds.find((i) => i.id === impoundId);
+  if (!imp || imp.status === "released") return "already_released";
+  if (await kvFindActive(impoundId)) return "active_exists";
+
+  const claimed = await kv.set(K.checkoutLock(impoundId), pickupId, {
+    nx: true,
+    ex: CHECKOUT_LOCK_TTL_SEC,
+  });
+  if (claimed) return "reserved";
+  const holder = await kv.get<string>(K.checkoutLock(impoundId));
+  if (holder === pickupId) return "reserved";
+  return "locked";
+}
+
+async function kvCreateRelease(
+  release: Release,
+  opts?: CreateReleaseOpts,
+): Promise<CreateReleaseResult> {
   const impounds = await kvGetImpounds();
   const imp = impounds.find((i) => i.id === release.impoundId);
   if (!imp || imp.status === "released") return "already_released";
 
   const existing = await kvFindActive(release.impoundId);
   if (existing) return "active_exists";
+
+  const lockHolder = await kv.get<string>(K.checkoutLock(release.impoundId));
+  if (lockHolder && lockHolder !== opts?.pickupId) return "active_exists";
+
+  if (lockHolder && opts?.pickupId === lockHolder) {
+    await kv.set(K.activeRelease(release.impoundId), release.code);
+    try {
+      await kvStoreRelease(release);
+    } catch (err) {
+      await clearActiveIf(release.impoundId, release.code);
+      throw err;
+    }
+    await kv.eval(CLEAR_ACTIVE_IF_VALUE, [K.checkoutLock(release.impoundId)], [
+      opts.pickupId,
+    ]);
+    return "created";
+  }
 
   const claimed = await claimActiveRelease(release.impoundId, release.code);
   if (!claimed) return "active_exists";
@@ -348,10 +499,26 @@ export async function resetStore(): Promise<void> {
     }
     await kv.del(K.pendingIds);
 
+    const sessionHashes =
+      ((await kv.smembers(K.attendantSessionIds)) as string[] | null) ?? [];
+    if (sessionHashes.length > 0) {
+      await Promise.all(sessionHashes.map((h) => kv.del(K.attendantSession(h))));
+    }
+    await kv.del(K.attendantSessionIds);
+
+    const lockIds = new Set(
+      [...readSeed(), ...(((await kv.get<Impound[]>(K.impounds)) ?? []) as Impound[])].map(
+        (i) => i.id,
+      ),
+    );
+    if (lockIds.size > 0) {
+      await Promise.all([...lockIds].map((id) => kv.del(K.checkoutLock(id))));
+    }
+
     // Re-seed impounds from disk (resets any "released" statuses).
     await kv.del(K.seeded);
     await kvEnsureSeeded();
     return;
   }
-  fileWrite({ impounds: readSeed(), releases: [], pending: [] });
+  fileWrite(emptyStore());
 }

@@ -27,7 +27,8 @@ loopback `next dev` on `localhost` when `STRIPE_SECRET_KEY` is unset. Production
 Vercel, and any non-local host refuse to mint a code without a verified payment.
 
 Set `ATTENDANT_PIN` in `.env.local` before using the attendant console. There is
-no default PIN.
+no default PIN. Prefer a long random value; the session cookie is not derived
+from the PIN.
 
 ### With real Stripe test mode
 
@@ -201,7 +202,7 @@ lib/
   fees.ts     fee breakdown + USD formatting
   codes.ts    release code generator
   stripe.ts   Stripe helper
-  security.ts timing-safe secrets, demo-release gate, PIN rate limit
+  security.ts timing-safe secrets, demo-release gate, opaque PIN sessions + rate limit
   image.ts    client-side image compression
   types.ts
 middleware.ts                         strips a pin query parameter before verify renders
