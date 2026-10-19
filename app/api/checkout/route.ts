@@ -1,18 +1,14 @@
-import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import {
-  createPendingPickup,
-  createRelease,
-  findActiveRelease,
-  getCheckoutLock,
-  getImpound,
-  releaseCheckout,
-  reserveCheckout,
-} from "@/lib/db";
+import { startPaidCheckout } from "@/lib/checkout";
+import { createRelease, findActiveRelease, getCheckoutLock, getImpound } from "@/lib/db";
 import { computeFees } from "@/lib/fees";
 import { generateReleaseCode } from "@/lib/codes";
-import { baseUrl, getStripe } from "@/lib/stripe";
-import { unpaidDemoReleaseAllowed } from "@/lib/security";
+import { baseUrl, createCheckoutSession, getStripe } from "@/lib/stripe";
+import {
+  clientIp,
+  takeCheckoutRateLimit,
+  unpaidDemoReleaseAllowed,
+} from "@/lib/security";
 import type { DocumentUploads } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -59,16 +55,26 @@ export async function POST(req: Request) {
       { status: 409 },
     );
   }
+  // A lock exists only while an authorized payment is being finalized.
   if (await getCheckoutLock(impound.id)) {
     return NextResponse.json(
       { error: "A payment is already in progress for this vehicle." },
       { status: 409 },
     );
   }
+
+  const limited = takeCheckoutRateLimit(clientIp(req), impound.id);
+  if (limited.blocked) {
+    return NextResponse.json(
+      { error: "Too many checkout attempts. Try again later." },
+      { status: 429, headers: { "Retry-After": String(limited.retryAfterSec) } },
+    );
+  }
+
   const fees = computeFees(impound);
 
-  // Unpaid demo codes exist only for loopback development. Public and
-  // production deploys must not mint a release without a verified payment.
+  // Unpaid demo codes require an explicit server flag. Public and production
+  // deploys must not mint a release without a verified payment.
   if (!process.env.STRIPE_SECRET_KEY) {
     if (!unpaidDemoReleaseAllowed(req)) {
       return NextResponse.json(
@@ -108,54 +114,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Payment processor misconfigured." }, { status: 500 });
   }
 
-  // Claim the impound before sending the customer to Stripe so a second
-  // payer cannot bind the same vehicle after both have been charged.
-  const pickupId = `pickup_${randomBytes(12).toString("hex")}`;
-  const reserved = await reserveCheckout(impound.id, pickupId);
-  if (reserved === "already_released") {
-    return NextResponse.json({ error: "Vehicle already released." }, { status: 409 });
-  }
-  if (reserved !== "reserved") {
-    return NextResponse.json(
-      { error: "A payment is already in progress for this vehicle." },
-      { status: 409 },
-    );
-  }
+  const session = await startPaidCheckout({
+    impound,
+    customerName: name,
+    customerPhone: phone,
+    docs,
+    amountCents: fees.total,
+    successUrl: `${baseUrl()}/pickup/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancelUrl: `${baseUrl()}/pickup/${impound.id}`,
+    createSession: (params) => createCheckoutSession(params),
+  });
 
-  try {
-    await createPendingPickup({
-      id: pickupId,
-      impoundId: impound.id,
-      customerName: name,
-      customerPhone: phone,
-      docs,
-      createdAt: new Date().toISOString(),
-    });
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "usd",
-            unit_amount: fees.total,
-            product_data: {
-              name: `Valor impound release - ${impound.year} ${impound.make} ${impound.model}`,
-              description: `Plate ${impound.plate} (${impound.state}) \u2022 Impound ${impound.id}`,
-            },
-          },
-        },
-      ],
-      metadata: { pickupId, impoundId: impound.id },
-      success_url: `${baseUrl()}/pickup/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl()}/pickup/${impound.id}`,
-    });
-
-    return NextResponse.json({ url: session.url });
-  } catch (err) {
-    await releaseCheckout(impound.id, pickupId);
-    throw err;
-  }
+  return NextResponse.json({ url: session.url });
 }

@@ -48,7 +48,11 @@ type FileStore = {
   attendantSessions: StoredSession[];
 };
 
-export const CHECKOUT_LOCK_TTL_SEC = 3600;
+/**
+ * How long an authorized payment may hold the impound if finalizing crashes.
+ * Checkout session creation does not write this lock.
+ */
+export const CHECKOUT_LOCK_TTL_SEC = 15 * 60;
 
 function emptyStore(): FileStore {
   return {
@@ -227,6 +231,7 @@ export async function getCheckoutLock(impoundId: string): Promise<string | null>
   return lock?.pickupId ?? null;
 }
 
+/** Claim the impound after the card is authorized. Do not call this before payment. */
 export async function reserveCheckout(
   impoundId: string,
   pickupId: string,
@@ -452,6 +457,13 @@ async function kvRedeem(key: string, attendant: string): Promise<RedeemResult> {
   }
   await clearActiveIf(release.impoundId, key);
   return { status: "redeemed", release };
+}
+
+export async function getPendingPickup(id: string): Promise<PendingPickup | null> {
+  if (useKV()) {
+    return (await kv.get<PendingPickup>(K.pending(id))) ?? null;
+  }
+  return fileRead().pending.find((p) => p.id === id) ?? null;
 }
 
 export async function createPendingPickup(p: PendingPickup): Promise<void> {

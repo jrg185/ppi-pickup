@@ -17,3 +17,24 @@ export function isDemoMode(): boolean {
 export function baseUrl(): string {
   return process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
 }
+
+type CheckoutSessionFactory = (
+  params: Stripe.Checkout.SessionCreateParams,
+) => Promise<{ url: string | null }>;
+
+let testSessionFactory: CheckoutSessionFactory | null = null;
+
+/** Test-only. Production leaves this unset so sessions are created at Stripe. */
+export function setCheckoutSessionFactoryForTests(factory: CheckoutSessionFactory | null): void {
+  testSessionFactory = factory;
+}
+
+export async function createCheckoutSession(
+  params: Stripe.Checkout.SessionCreateParams,
+): Promise<{ url: string | null }> {
+  if (testSessionFactory) return testSessionFactory(params);
+  const stripe = getStripe();
+  if (!stripe) throw new Error("Payment processor misconfigured.");
+  const session = await stripe.checkout.sessions.create(params);
+  return { url: session.url };
+}

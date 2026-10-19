@@ -1,14 +1,8 @@
 import Link from "next/link";
 import QRCode from "qrcode";
-import {
-  consumePendingPickup,
-  createRelease,
-  getImpound,
-  getRelease,
-  getReleaseBySession,
-} from "@/lib/db";
+import { finalizePaidCheckout, paidSessionSnapshot } from "@/lib/checkout";
+import { getImpound, getRelease } from "@/lib/db";
 import { computeFees, formatUSD } from "@/lib/fees";
-import { generateReleaseCode } from "@/lib/codes";
 import { baseUrl, getStripe } from "@/lib/stripe";
 
 export const dynamic = "force-dynamic";
@@ -19,44 +13,22 @@ async function resolveCode(sp: SearchParams): Promise<string | null> {
   if (sp.code) return sp.code.toUpperCase();
   if (!sp.session_id) return null;
 
-  // Idempotent: if we've already minted a release for this session, return it.
-  const existing = await getReleaseBySession(sp.session_id);
-  if (existing) return existing.code;
-
   const stripe = getStripe();
   if (!stripe) return null;
-  const session = await stripe.checkout.sessions.retrieve(sp.session_id);
-  if (session.payment_status !== "paid") return null;
-
-  const pickupId = session.metadata?.pickupId;
-  const impoundId = session.metadata?.impoundId;
-  if (!pickupId || !impoundId) return null;
-  const pending = await consumePendingPickup(pickupId);
-  if (!pending) return null;
-
-  const code = generateReleaseCode();
-  const created = await createRelease(
-    {
-      code,
-      impoundId,
-      customerName: pending.customerName,
-      customerPhone: pending.customerPhone,
-      docs: pending.docs,
-      amountPaidCents: session.amount_total ?? 0,
-      paidAt: new Date().toISOString(),
-      issuedAt: new Date().toISOString(),
-      redeemedAt: null,
-      redeemedBy: null,
-      stripeSessionId: session.id,
-      demo: false,
+  const session = await stripe.checkout.sessions.retrieve(sp.session_id, {
+    expand: ["payment_intent"],
+  });
+  return finalizePaidCheckout(paidSessionSnapshot(session), {
+    capture: async (id) => {
+      await stripe.paymentIntents.capture(id);
     },
-    { pickupId },
-  );
-  if (created !== "created") {
-    const again = await getReleaseBySession(session.id);
-    return again?.code ?? null;
-  }
-  return code;
+    voidAuthorization: async (id) => {
+      await stripe.paymentIntents.cancel(id);
+    },
+    refund: async (id) => {
+      await stripe.refunds.create({ payment_intent: id });
+    },
+  });
 }
 
 export default async function SuccessPage({
