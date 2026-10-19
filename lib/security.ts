@@ -16,38 +16,34 @@ export function isLoopbackHostname(hostname: string): boolean {
   return LOOPBACK_HOSTS.has(host);
 }
 
-function hostnameFromAuthority(authority: string): string | null {
-  const trimmed = authority.trim();
-  if (!trimmed) return null;
-  try {
-    return new URL(`http://${trimmed}`).hostname;
-  } catch {
-    return null;
-  }
+/**
+ * Explicit server opt-in for unpaid codes. Host and X-Forwarded-Host are not
+ * consulted: both are chosen by the caller.
+ */
+function unpaidDemoOptIn(): boolean {
+  const flag = process.env.ALLOW_UNPAID_DEMO?.trim().toLowerCase() ?? "";
+  return flag === "1" || flag === "true";
 }
 
 /**
- * Unpaid release codes are allowed only for loopback `next dev`.
- * Production, Vercel, and any non-local host fail closed.
+ * Unpaid release codes are allowed only when the server operator opts in for
+ * loopback `next dev`. Production, Vercel, a configured Stripe key, and a
+ * non-loopback base URL fail closed. The request is accepted so callers can
+ * pass it through, and is ignored on purpose.
  */
-export function unpaidDemoReleaseAllowed(req: Request): boolean {
+export function unpaidDemoReleaseAllowed(_req: Request): boolean {
+  if (!unpaidDemoOptIn()) return false;
   if (!isDemoMode()) return false;
   if (process.env.NODE_ENV === "production") return false;
   if (process.env.VERCEL) return false;
 
   const base = process.env.NEXT_PUBLIC_BASE_URL;
-  if (base) {
-    try {
-      if (!isLoopbackHostname(new URL(base).hostname)) return false;
-    } catch {
-      return false;
-    }
+  if (!base) return true;
+  try {
+    return isLoopbackHostname(new URL(base).hostname);
+  } catch {
+    return false;
   }
-
-  const authority = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "";
-  const hostname = hostnameFromAuthority(authority);
-  if (!hostname) return false;
-  return isLoopbackHostname(hostname);
 }
 
 /** Reset is disabled unless ADMIN_RESET_SECRET is set and the header matches. */
@@ -158,6 +154,38 @@ export const PIN_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 
 export function pinAttemptBucket(ip: string): string {
   return `attendant-pin:${ip}`;
+}
+
+export const CHECKOUT_IP_LIMIT = 20;
+export const CHECKOUT_IMPOUND_LIMIT = 8;
+export const CHECKOUT_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Count a checkout attempt against the caller and the impound.
+ * The impound bucket does not depend on forwarded headers, so a spoofed
+ * X-Forwarded-For cannot reset it.
+ */
+export function takeCheckoutRateLimit(
+  ip: string,
+  impoundId: string,
+): { blocked: boolean; retryAfterSec: number } {
+  const ipKey = `checkout-ip:${ip}`;
+  const impoundKey = `checkout-impound:${impoundId}`;
+  const ipStatus = rateLimitStatus(ipKey, CHECKOUT_IP_LIMIT, CHECKOUT_ATTEMPT_WINDOW_MS);
+  if (ipStatus.blocked) return ipStatus;
+  const impoundStatus = rateLimitStatus(
+    impoundKey,
+    CHECKOUT_IMPOUND_LIMIT,
+    CHECKOUT_ATTEMPT_WINDOW_MS,
+  );
+  if (impoundStatus.blocked) return impoundStatus;
+  recordRateLimitFailure(ipKey, CHECKOUT_ATTEMPT_WINDOW_MS);
+  recordRateLimitFailure(impoundKey, CHECKOUT_ATTEMPT_WINDOW_MS);
+  return { blocked: false, retryAfterSec: 0 };
+}
+
+export function resetRateLimitsForTests(): void {
+  buckets.clear();
 }
 
 export function readCookie(req: Request, name: string): string | undefined {

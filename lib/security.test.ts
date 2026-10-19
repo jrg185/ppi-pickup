@@ -55,8 +55,10 @@ async function withEnvAsync(
   }
 }
 
-function requestFrom(host: string): Request {
-  return new Request("http://localhost/api/checkout", { headers: { host } });
+function requestFrom(host: string, extra?: Record<string, string>): Request {
+  return new Request("http://pickup.example.com/api/checkout", {
+    headers: { host, ...extra },
+  });
 }
 
 test("admin reset is disabled until a secret is configured", () => {
@@ -91,19 +93,49 @@ test("attendant PIN matches only the env value", () => {
   });
 });
 
-test("unpaid demo releases are refused unless loopback dev", () => {
+test("unpaid demo releases ignore Host and require an explicit server flag", () => {
+  const spoofed = requestFrom("pickup.example.com", { "x-forwarded-host": "localhost" });
+  const local = requestFrom("localhost:3000");
+
   withEnv(
     {
       STRIPE_SECRET_KEY: undefined,
       VERCEL: undefined,
       NODE_ENV: "development",
       NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: undefined,
     },
     () => {
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), true);
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("127.0.0.1:3000")), true);
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("192.168.1.47:3000")), false);
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("pickup.example.com")), false);
+      assert.equal(unpaidDemoReleaseAllowed(local), false);
+      assert.equal(unpaidDemoReleaseAllowed(spoofed), false);
+      assert.equal(unpaidDemoReleaseAllowed(requestFrom("127.0.0.1:3000")), false);
+    },
+  );
+
+  withEnv(
+    {
+      STRIPE_SECRET_KEY: undefined,
+      VERCEL: undefined,
+      NODE_ENV: "development",
+      NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: "1",
+    },
+    () => {
+      assert.equal(unpaidDemoReleaseAllowed(spoofed), true);
+      assert.equal(unpaidDemoReleaseAllowed(requestFrom("192.168.1.47:3000")), true);
+    },
+  );
+
+  withEnv(
+    {
+      STRIPE_SECRET_KEY: undefined,
+      VERCEL: undefined,
+      NODE_ENV: "development",
+      NEXT_PUBLIC_BASE_URL: undefined,
+      ALLOW_UNPAID_DEMO: "true",
+    },
+    () => {
+      assert.equal(unpaidDemoReleaseAllowed(local), true);
     },
   );
 
@@ -113,9 +145,10 @@ test("unpaid demo releases are refused unless loopback dev", () => {
       VERCEL: undefined,
       NODE_ENV: "production",
       NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: "1",
     },
     () => {
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), false);
+      assert.equal(unpaidDemoReleaseAllowed(spoofed), false);
     },
   );
 
@@ -125,9 +158,10 @@ test("unpaid demo releases are refused unless loopback dev", () => {
       VERCEL: "1",
       NODE_ENV: "development",
       NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: "1",
     },
     () => {
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), false);
+      assert.equal(unpaidDemoReleaseAllowed(spoofed), false);
     },
   );
 
@@ -137,9 +171,10 @@ test("unpaid demo releases are refused unless loopback dev", () => {
       VERCEL: undefined,
       NODE_ENV: "development",
       NEXT_PUBLIC_BASE_URL: "https://valor-pickup.vercel.app",
+      ALLOW_UNPAID_DEMO: "1",
     },
     () => {
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), false);
+      assert.equal(unpaidDemoReleaseAllowed(spoofed), false);
     },
   );
 
@@ -149,9 +184,23 @@ test("unpaid demo releases are refused unless loopback dev", () => {
       VERCEL: undefined,
       NODE_ENV: "development",
       NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: "1",
     },
     () => {
-      assert.equal(unpaidDemoReleaseAllowed(requestFrom("localhost:3000")), false);
+      assert.equal(unpaidDemoReleaseAllowed(local), false);
+    },
+  );
+
+  withEnv(
+    {
+      STRIPE_SECRET_KEY: undefined,
+      VERCEL: undefined,
+      NODE_ENV: "development",
+      NEXT_PUBLIC_BASE_URL: "http://localhost:3000",
+      ALLOW_UNPAID_DEMO: "yes",
+    },
+    () => {
+      assert.equal(unpaidDemoReleaseAllowed(local), false);
     },
   );
 });

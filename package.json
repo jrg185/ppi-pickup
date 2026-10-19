@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test lib/security.test.ts lib/release-guard.test.ts"
+    "test": "tsx --test lib/security.test.ts lib/release-guard.test.ts lib/checkout.test.ts"
   },
   "dependencies": {
     "@vercel/kv": "^3.0.0",

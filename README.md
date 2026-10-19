@@ -23,8 +23,11 @@ Open <http://localhost:3000>.
 ### Local development without Stripe
 
 Release codes are issued only after Stripe confirms payment. The one exception is
-loopback `next dev` on `localhost` when `STRIPE_SECRET_KEY` is unset. Production,
-Vercel, and any non-local host refuse to mint a code without a verified payment.
+loopback `next dev` when `STRIPE_SECRET_KEY` is unset and `ALLOW_UNPAID_DEMO=1`
+is set in the server environment. `Host` and `X-Forwarded-Host` cannot turn that
+on. Production, Vercel, and any non-loopback `NEXT_PUBLIC_BASE_URL` refuse to
+mint a code without a verified payment. Do not set `ALLOW_UNPAID_DEMO` if the
+dev server is reachable from another device, a LAN bind, or a tunnel.
 
 Set `ATTENDANT_PIN` in `.env.local` before using the attendant console. There is
 no default PIN. Prefer a long random value; the session cookie is not derived
@@ -115,10 +118,11 @@ Now make sure your phone is on the same Wi-Fi. On your phone, visit
 `http://192.168.1.47:3000` &mdash; you should see the portal. Then scanning the QR code
 from your laptop screen will open the attendant verify page on your phone.
 
-> Stripe is required once the site is opened from another device. A LAN host is not
-> loopback, so checkout will not issue a release code until `STRIPE_SECRET_KEY` is set
-> and the payment is verified. Stripe redirects back to `NEXT_PUBLIC_BASE_URL`, so
-> change that when switching between localhost and a LAN IP.
+> Stripe is required once the site is opened from another device. Leave
+> `ALLOW_UNPAID_DEMO` unset for a LAN or tunnel bind. Checkout will not issue a
+> release code until `STRIPE_SECRET_KEY` is set and the card authorization is
+> captured. Stripe redirects back to `NEXT_PUBLIC_BASE_URL`, so change that when
+> switching between localhost and a LAN IP.
 
 ## Demo script (3 minutes)
 
