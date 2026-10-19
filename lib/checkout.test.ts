@@ -6,13 +6,18 @@ import { POST } from "../app/api/checkout/route";
 import {
   CHECKOUT_SESSION_TTL_SEC,
   finalizePaidCheckout,
+  setFinalizeBarrierForTests,
   type PaidCheckoutSessionParams,
   type PaidSessionSnapshot,
 } from "./checkout";
 import {
+  PENDING_PICKUP_TTL_SEC,
+  createPendingPickup,
   findActiveRelease,
   getCheckoutLock,
+  getPendingPickup,
   getRelease,
+  reserveCheckout,
   resetStore,
 } from "./db";
 import { CHECKOUT_IMPOUND_LIMIT, resetRateLimitsForTests } from "./security";
@@ -293,6 +298,348 @@ test("checkout does not lock a vehicle before payment and ignores forwarded host
     } finally {
       setCheckoutSessionFactoryForTests(null);
     }
+  });
+
+  fs.rmSync(STORE_PATH, { force: true });
+});
+
+function defer(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function tally() {
+  const calls = { capture: 0, voidAuthorization: 0, refund: 0 };
+  return {
+    calls,
+    actions: {
+      capture: async () => {
+        calls.capture += 1;
+      },
+      voidAuthorization: async () => {
+        calls.voidAuthorization += 1;
+      },
+      refund: async () => {
+        calls.refund += 1;
+      },
+    },
+  };
+}
+
+async function seedPending(pickupId: string, impoundId = "IMP-24082"): Promise<void> {
+  await createPendingPickup({
+    id: pickupId,
+    impoundId,
+    customerName: "Ada Lovelace",
+    customerPhone: "7035550100",
+    docs,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+test("overlapping finalize of one paid session does not reverse that charge", async (t) => {
+  if (process.env.KV_REST_API_URL) {
+    t.skip("file-store assertions do not run against Vercel KV");
+    return;
+  }
+
+  const impoundId = "IMP-24082";
+  const pickupId = "pickup_overlap";
+
+  t.after(() => {
+    setFinalizeBarrierForTests(null);
+    fs.rmSync(STORE_PATH, { force: true });
+  });
+
+  await t.test("a later visit sees the release and does not refund", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    setFinalizeBarrierForTests(null);
+    await seedPending(pickupId);
+
+    const releaseCapture = defer();
+    const entered = defer();
+    const { calls, actions } = tally();
+    actions.capture = async () => {
+      calls.capture += 1;
+      entered.resolve();
+      await releaseCapture.promise;
+    };
+
+    const winner = finalizePaidCheckout(
+      snapshot({
+        id: "cs_overlap",
+        impoundId,
+        pickupId,
+        paymentIntent: { id: "pi_overlap", status: "requires_capture", amount: 25000 },
+      }),
+      actions,
+    );
+    await entered.promise;
+
+    const loserReady = defer();
+    setFinalizeBarrierForTests(async () => {
+      loserReady.resolve();
+      await winner;
+    });
+    const loser = finalizePaidCheckout(
+      snapshot({
+        id: "cs_overlap",
+        impoundId,
+        pickupId,
+        paymentStatus: "paid",
+        paymentIntent: { id: "pi_overlap", status: "succeeded", amount: 25000 },
+      }),
+      actions,
+    );
+    await loserReady.promise;
+    releaseCapture.resolve();
+
+    const code = await winner;
+    assert.equal(await loser, code);
+    assert.ok(code);
+    assert.equal(calls.refund, 0);
+    assert.equal(calls.voidAuthorization, 0);
+    assert.equal((await getRelease(code!))?.stripeSessionId, "cs_overlap");
+    assert.equal(await getCheckoutLock(impoundId), null);
+  });
+
+  await t.test("a visit that reserved first does not void after the pending row is consumed", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    setFinalizeBarrierForTests(null);
+    await seedPending(pickupId);
+
+    const releaseCapture = defer();
+    const entered = defer();
+    const { calls, actions } = tally();
+    actions.capture = async () => {
+      calls.capture += 1;
+      entered.resolve();
+      await releaseCapture.promise;
+    };
+
+    const winner = finalizePaidCheckout(
+      snapshot({
+        id: "cs_overlap",
+        impoundId,
+        pickupId,
+        paymentIntent: { id: "pi_overlap", status: "requires_capture", amount: 25000 },
+      }),
+      actions,
+    );
+    await entered.promise;
+
+    let pauses = 0;
+    const loserReady = defer();
+    setFinalizeBarrierForTests(async () => {
+      pauses += 1;
+      if (pauses < 2) return;
+      loserReady.resolve();
+      await winner;
+    });
+    const loser = finalizePaidCheckout(
+      snapshot({
+        id: "cs_overlap",
+        impoundId,
+        pickupId,
+        paymentStatus: "paid",
+        paymentIntent: { id: "pi_overlap", status: "succeeded", amount: 25000 },
+      }),
+      actions,
+    );
+    await loserReady.promise;
+    releaseCapture.resolve();
+
+    const code = await winner;
+    assert.equal(await loser, code);
+    assert.ok(code);
+    assert.equal(calls.capture, 1);
+    assert.equal(calls.refund, 0);
+    assert.equal(calls.voidAuthorization, 0);
+    assert.equal(await getCheckoutLock(impoundId), null);
+  });
+
+  await t.test("a sibling capture that is already done does not drop the checkout lock", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    setFinalizeBarrierForTests(null);
+    await seedPending(pickupId);
+
+    const releaseFirst = defer();
+    const releaseSecond = defer();
+    const firstEntered = defer();
+    const secondEntered = defer();
+    const { calls, actions } = tally();
+    let captures = 0;
+    actions.capture = async () => {
+      calls.capture += 1;
+      captures += 1;
+      if (captures === 1) {
+        firstEntered.resolve();
+        await releaseFirst.promise;
+        return;
+      }
+      secondEntered.resolve();
+      await releaseSecond.promise;
+      const err = new Error(
+        "This PaymentIntent could not be captured because it has a status of succeeded. Only a PaymentIntent with one of the following statuses may be captured: requires_capture.",
+      ) as Error & { code: string; payment_intent: { status: string } };
+      err.code = "payment_intent_unexpected_state";
+      err.payment_intent = { status: "succeeded" };
+      throw err;
+    };
+
+    const session = snapshot({
+      id: "cs_overlap",
+      impoundId,
+      pickupId,
+      paymentIntent: { id: "pi_overlap", status: "requires_capture", amount: 25000 },
+    });
+    const first = finalizePaidCheckout(session, actions);
+    const second = finalizePaidCheckout(session, actions);
+    await firstEntered.promise;
+    await secondEntered.promise;
+    releaseSecond.resolve();
+    await Promise.race([first, second]);
+
+    assert.equal(await getCheckoutLock(impoundId), pickupId);
+    assert.equal(await reserveCheckout(impoundId, "pickup_other"), "locked");
+    assert.equal(calls.refund, 0);
+    assert.equal(calls.voidAuthorization, 0);
+
+    releaseFirst.resolve();
+    const codes = (await Promise.all([first, second])).filter(
+      (code): code is string => Boolean(code),
+    );
+    assert.equal(codes.length, 1);
+    assert.equal(calls.refund, 0);
+    assert.equal(calls.voidAuthorization, 0);
+    assert.equal(await getCheckoutLock(impoundId), null);
+    assert.equal((await findActiveRelease(impoundId))?.stripeSessionId, "cs_overlap");
+  });
+
+  await t.test("a failed capture still releases the lock", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    setFinalizeBarrierForTests(null);
+    await seedPending(pickupId);
+    const { calls, actions } = tally();
+    actions.capture = async () => {
+      calls.capture += 1;
+      const err = new Error(
+        "This PaymentIntent could not be captured because it has a status of canceled.",
+      ) as Error & { code: string; payment_intent: { status: string } };
+      err.code = "payment_intent_unexpected_state";
+      err.payment_intent = { status: "canceled" };
+      throw err;
+    };
+    const code = await finalizePaidCheckout(
+      snapshot({
+        id: "cs_cancel",
+        impoundId,
+        pickupId,
+        paymentIntent: { id: "pi_cancel", status: "requires_capture", amount: 25000 },
+      }),
+      actions,
+    );
+    assert.equal(code, null);
+    assert.equal(calls.refund, 0);
+    assert.equal(calls.voidAuthorization, 0);
+    assert.equal(await getCheckoutLock(impoundId), null);
+    assert.equal(await findActiveRelease(impoundId), null);
+  });
+
+  fs.rmSync(STORE_PATH, { force: true });
+});
+
+test("file store keeps in-flight pending pickups", async (t) => {
+  if (process.env.KV_REST_API_URL) {
+    t.skip("file-store assertions do not run against Vercel KV");
+    return;
+  }
+
+  t.after(() => {
+    fs.rmSync(STORE_PATH, { force: true });
+  });
+
+  await t.test("more than 20 fresh checkouts stay readable and can be finalized", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    const impounds = ["IMP-24081", "IMP-24082", "IMP-24083"];
+    const ids: string[] = [];
+    for (let i = 0; i < 24; i++) {
+      const id = `pickup_cap_${i}`;
+      ids.push(id);
+      await createPendingPickup({
+        id,
+        impoundId: impounds[i % impounds.length],
+        customerName: "Ada Lovelace",
+        customerPhone: "7035550100",
+        docs,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    assert.equal((await getPendingPickup(ids[0]))?.id, ids[0]);
+    assert.equal((await getPendingPickup(ids[23]))?.id, ids[23]);
+
+    const { calls, actions } = tally();
+    const code = await finalizePaidCheckout(
+      snapshot({
+        id: "cs_early",
+        impoundId: "IMP-24081",
+        pickupId: ids[0],
+        paymentIntent: { id: "pi_early", status: "requires_capture", amount: 25000 },
+      }),
+      actions,
+    );
+    assert.ok(code);
+    assert.equal(calls.capture, 1);
+    assert.equal(calls.voidAuthorization, 0);
+    assert.equal(calls.refund, 0);
+    assert.equal((await getRelease(code!))?.stripeSessionId, "cs_early");
+    assert.equal((await getPendingPickup(ids[3]))?.id, ids[3]);
+  });
+
+  await t.test("expired pending pickups are dropped instead of crowding out fresh ones", async () => {
+    fs.rmSync(STORE_PATH, { force: true });
+    await resetStore();
+    await createPendingPickup({
+      id: "pickup_stale",
+      impoundId: "IMP-24081",
+      customerName: "Ada Lovelace",
+      customerPhone: "7035550100",
+      docs,
+      createdAt: new Date().toISOString(),
+    });
+    const stored = JSON.parse(fs.readFileSync(STORE_PATH, "utf8")) as {
+      pending: Array<{ id: string; createdAt: string }>;
+    };
+    stored.pending[0].createdAt = new Date(
+      Date.now() - (PENDING_PICKUP_TTL_SEC + 60) * 1000,
+    ).toISOString();
+    fs.writeFileSync(STORE_PATH, JSON.stringify(stored));
+    assert.equal(await getPendingPickup("pickup_stale"), null);
+
+    await createPendingPickup({
+      id: "pickup_fresh",
+      impoundId: "IMP-24081",
+      customerName: "Ada Lovelace",
+      customerPhone: "7035550100",
+      docs,
+      createdAt: new Date().toISOString(),
+    });
+    const raw = JSON.parse(fs.readFileSync(STORE_PATH, "utf8")) as {
+      pending: Array<{ id: string }>;
+    };
+    assert.equal(
+      raw.pending.some((row) => row.id === "pickup_stale"),
+      false,
+    );
+    assert.equal((await getPendingPickup("pickup_fresh"))?.id, "pickup_fresh");
   });
 
   fs.rmSync(STORE_PATH, { force: true });

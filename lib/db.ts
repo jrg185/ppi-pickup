@@ -54,6 +54,9 @@ type FileStore = {
  */
 export const CHECKOUT_LOCK_TTL_SEC = 15 * 60;
 
+/** Pending pickups expire on the same 1-hour TTL as the KV keys. */
+export const PENDING_PICKUP_TTL_SEC = 60 * 60;
+
 function emptyStore(): FileStore {
   return {
     impounds: readSeed(),
@@ -459,22 +462,34 @@ async function kvRedeem(key: string, attendant: string): Promise<RedeemResult> {
   return { status: "redeemed", release };
 }
 
+function pendingPickupCurrent(p: PendingPickup, now = Date.now()): boolean {
+  const created = Date.parse(p.createdAt);
+  return Number.isFinite(created) && now - created < PENDING_PICKUP_TTL_SEC * 1000;
+}
+
 export async function getPendingPickup(id: string): Promise<PendingPickup | null> {
   if (useKV()) {
     return (await kv.get<PendingPickup>(K.pending(id))) ?? null;
   }
-  return fileRead().pending.find((p) => p.id === id) ?? null;
+  const row = fileRead().pending.find((p) => p.id === id);
+  if (!row || !pendingPickupCurrent(row)) return null;
+  return row;
 }
 
 export async function createPendingPickup(p: PendingPickup): Promise<void> {
   if (useKV()) {
     // Pending pickups should never linger: 1 hour TTL.
-    await kv.set(K.pending(p.id), p, { ex: 3600 });
+    await kv.set(K.pending(p.id), p, { ex: PENDING_PICKUP_TTL_SEC });
     await kv.sadd(K.pendingIds, p.id);
     return;
   }
   const s = fileRead();
-  s.pending = [...s.pending.slice(-20), p];
+  const now = Date.now();
+  // Drop expired rows only. An in-flight checkout stays until the TTL.
+  s.pending = s.pending.filter(
+    (row) => row.id !== p.id && pendingPickupCurrent(row, now),
+  );
+  if (pendingPickupCurrent(p, now)) s.pending.push(p);
   fileWrite(s);
 }
 
@@ -493,7 +508,7 @@ export async function consumePendingPickup(
   if (idx < 0) return null;
   const [picked] = s.pending.splice(idx, 1);
   fileWrite(s);
-  return picked;
+  return pendingPickupCurrent(picked) ? picked : null;
 }
 
 /** Reset the prototype store back to seed data. Useful between demos. */

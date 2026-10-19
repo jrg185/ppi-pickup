@@ -5,6 +5,7 @@ import {
   consumePendingPickup,
   createPendingPickup,
   createRelease,
+  findActiveRelease,
   getPendingPickup,
   getReleaseBySession,
   releaseCheckout,
@@ -63,6 +64,52 @@ function authorizationState(session: PaidSessionSnapshot): Authorization {
   if (status === "requires_capture") return "hold";
   if (status === "succeeded" || session.paymentStatus === "paid") return "captured";
   return "none";
+}
+
+/**
+ * Stripe throws when a second success-page request captures a PaymentIntent
+ * the first request already captured. That failure must not be treated as an
+ * abandoned authorization.
+ */
+function authorizationAlreadyCaptured(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const record = err as {
+    code?: unknown;
+    message?: unknown;
+    payment_intent?: { status?: unknown } | null;
+    raw?: { payment_intent?: { status?: unknown } | null } | null;
+  };
+  const status = record.payment_intent?.status ?? record.raw?.payment_intent?.status;
+  if (status === "succeeded") return true;
+  if (record.code === "charge_already_captured") return true;
+  if (record.code !== "payment_intent_unexpected_state") return false;
+  const message = typeof record.message === "string" ? record.message : "";
+  return /succeeded|already been captured|already captured/i.test(message);
+}
+
+/** Release code already issued to this Checkout Session, if any. */
+async function releaseCodeForSession(
+  sessionId: string,
+  impoundId: string,
+): Promise<string | null> {
+  const bySession = await getReleaseBySession(sessionId);
+  if (bySession) return bySession.code;
+  const active = await findActiveRelease(impoundId);
+  if (active?.stripeSessionId === sessionId) return active.code;
+  return null;
+}
+
+let finalizeBarrier: (() => Promise<void>) | null = null;
+
+/** Test-only pause so two success-page visits can overlap at a chosen point. */
+export function setFinalizeBarrierForTests(
+  barrier: (() => Promise<void>) | null,
+): void {
+  finalizeBarrier = barrier;
+}
+
+async function waitForFinalizeBarrier(): Promise<void> {
+  if (finalizeBarrier) await finalizeBarrier();
 }
 
 function intentStatus(
@@ -186,19 +233,27 @@ export async function finalizePaidCheckout(
   const impoundId = session.impoundId;
   if (!pickupId || !impoundId) return null;
 
+  await waitForFinalizeBarrier();
+
   const reserved = await reserveCheckout(impoundId, pickupId);
   if (reserved !== "reserved") {
+    const owned = await releaseCodeForSession(session.id, impoundId);
+    if (owned) return owned;
     await settleUnusedAuthorization(
       session,
       auth,
       actions,
       "Failed to release a duplicate card authorization",
     );
-    return (await getReleaseBySession(session.id))?.code ?? null;
+    return null;
   }
+
+  await waitForFinalizeBarrier();
 
   const pending = await getPendingPickup(pickupId);
   if (!pending) {
+    const owned = await releaseCodeForSession(session.id, impoundId);
+    if (owned) return owned;
     await releaseCheckout(impoundId, pickupId);
     await settleUnusedAuthorization(
       session,
@@ -236,7 +291,7 @@ export async function finalizePaidCheckout(
       { pickupId },
     );
     if (created !== "created") {
-      const again = await getReleaseBySession(session.id);
+      const again = await releaseCodeForSession(session.id, impoundId);
       await releaseCheckout(impoundId, pickupId);
       if (!again && captured) {
         await settleUnusedAuthorization(
@@ -246,13 +301,23 @@ export async function finalizePaidCheckout(
           "Failed to refund a checkout that did not receive a release",
         );
       }
-      return again?.code ?? null;
+      return again;
     }
     await consumePendingPickup(pickupId);
     return code;
   } catch (err) {
-    console.error("Failed to finalize an authorized checkout", err);
-    if (!captured) await releaseCheckout(impoundId, pickupId);
+    const siblingCaptured = authorizationAlreadyCaptured(err);
+    if (!siblingCaptured) {
+      console.error("Failed to finalize an authorized checkout", err);
+    }
+    const owned = await releaseCodeForSession(session.id, impoundId);
+    if (owned) return owned;
+    // The sibling request captured this PaymentIntent and still holds the
+    // lock while it writes the release. Dropping the lock lets that charge
+    // be refunded or claimed by another pickup.
+    if (!captured && !siblingCaptured) {
+      await releaseCheckout(impoundId, pickupId);
+    }
     return null;
   }
 }
